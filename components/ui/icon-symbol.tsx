@@ -19,6 +19,7 @@ const MAPPING = {
   'chevron.left.forwardslash.chevron.right': 'code',
   'chevron.right': 'chevron-right',
   'dumbbell.fill': 'fitness-center',
+  'heart.fill': 'favorite',
   'chart.bar.fill': 'bar-chart',
   'clock.fill': 'history',
   calendar: 'event-note',

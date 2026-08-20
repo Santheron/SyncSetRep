@@ -40,6 +40,14 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="cardio"
+        options={{
+          title: 'Cardio',
+          headerShown: false,
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="heart.fill" color={color} />,
+        }}
+      />
+      <Tabs.Screen
         name="progress"
         options={{
           title: 'Progress',
