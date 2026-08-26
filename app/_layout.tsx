@@ -29,18 +29,7 @@ export default function RootLayout() {
     <ThemeProvider value={FitnessDarkTheme}>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen
-          name="workout/[sessionId]"
-          options={{
-            title: 'Workout',
-            headerStyle: { backgroundColor: palette.background },
-            headerTintColor: palette.text,
-            headerShadowVisible: false,
-            headerTitleStyle: { fontSize: 22, fontWeight: '700' },
-            headerBackTitle: 'Workout',
-            contentStyle: { backgroundColor: palette.background },
-          }}
-        />
+        <Stack.Screen name="workout" options={{ headerShown: false }} />
       </Stack>
       <StatusBar style="light" />
     </ThemeProvider>

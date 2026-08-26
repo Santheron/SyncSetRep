@@ -13,16 +13,19 @@ import { useRouter } from 'expo-router';
 import { Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
 import {
-  addCardioLog,
   CARDIO_ACTIVITY_TYPES,
+  isCardioActivityType,
+  parseOptionalNumber,
+  setCardioSaveNotice,
   type CardioActivityType,
 } from '@/lib/cardio';
+import { supabase } from '@/lib/supabase';
 
 const palette = Colors.dark;
 
 export default function LogCardioScreen() {
   const router = useRouter();
-  const [activityType, setActivityType] = useState<CardioActivityType>('Walking');
+  const [activityType, setActivityType] = useState<CardioActivityType>('Incline Walk');
   const [duration, setDuration] = useState('');
   const [distance, setDistance] = useState('');
   const [speed, setSpeed] = useState('');
@@ -30,30 +33,88 @@ export default function LogCardioScreen() {
   const [calories, setCalories] = useState('');
   const [notes, setNotes] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
-  function optionalValue(value: string): string | null {
+  function optionalNotes(value: string): string | null {
     const trimmed = value.trim();
     return trimmed ? trimmed : null;
   }
 
-  function saveLog() {
-    const durationMinutes = Number(duration.trim());
+  function parseOptionalField(label: string, value: string): number | null | false {
+    const parsed = parseOptionalNumber(value);
 
-    if (!duration.trim() || !Number.isFinite(durationMinutes) || durationMinutes <= 0) {
-      setErrorMessage('Enter duration in minutes.');
+    if (!parsed.ok) {
+      setErrorMessage(`Enter a valid number for ${label}, or leave it blank.`);
+      return false;
+    }
+
+    return parsed.value;
+  }
+
+  function resetForm() {
+    setActivityType('Incline Walk');
+    setDuration('');
+    setDistance('');
+    setSpeed('');
+    setIncline('');
+    setCalories('');
+    setNotes('');
+    setErrorMessage(null);
+  }
+
+  async function saveLog() {
+    if (isSaving) {
       return;
     }
 
-    addCardioLog({
-      activityType,
-      durationMinutes,
-      distance: optionalValue(distance),
-      speed: optionalValue(speed),
-      incline: optionalValue(incline),
-      calories: optionalValue(calories),
-      notes: optionalValue(notes),
+    if (!isCardioActivityType(activityType)) {
+      setErrorMessage('Select an activity type.');
+      return;
+    }
+
+    const durationMinutes = Number(duration.trim());
+
+    if (!duration.trim() || !Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+      setErrorMessage('Duration must be greater than 0.');
+      return;
+    }
+
+    const parsedDistance = parseOptionalField('distance', distance);
+    const parsedSpeed = parseOptionalField('speed', speed);
+    const parsedIncline = parseOptionalField('incline', incline);
+    const parsedCalories = parseOptionalField('calories', calories);
+
+    if (
+      parsedDistance === false ||
+      parsedSpeed === false ||
+      parsedIncline === false ||
+      parsedCalories === false
+    ) {
+      return;
+    }
+
+    setIsSaving(true);
+    setErrorMessage(null);
+
+    const { error } = await supabase.from('cardio_sessions').insert({
+      activity_type: activityType,
+      started_at: new Date().toISOString(),
+      duration_minutes: durationMinutes,
+      distance_km: parsedDistance,
+      incline_percent: parsedIncline,
+      speed_kmh: parsedSpeed,
+      calories: parsedCalories,
+      notes: optionalNotes(notes),
     });
 
+    if (error) {
+      setErrorMessage(error.message);
+      setIsSaving(false);
+      return;
+    }
+
+    resetForm();
+    setCardioSaveNotice();
     router.back();
   }
 
@@ -102,24 +163,24 @@ export default function LogCardioScreen() {
         />
         <Field
           keyboardType="decimal-pad"
-          label="Distance (optional)"
+          label="Distance (km) optional"
           onChangeText={setDistance}
-          placeholder="Miles"
+          placeholder="2.5"
           value={distance}
         />
         <Field
           keyboardType="decimal-pad"
-          label="Speed (optional)"
-          onChangeText={setSpeed}
-          placeholder="mph"
-          value={speed}
-        />
-        <Field
-          keyboardType="decimal-pad"
-          label="Incline % (optional)"
+          label="Incline (%) optional"
           onChangeText={setIncline}
           placeholder="8"
           value={incline}
+        />
+        <Field
+          keyboardType="decimal-pad"
+          label="Speed (km/h) optional"
+          onChangeText={setSpeed}
+          placeholder="5.5"
+          value={speed}
         />
         <Field
           keyboardType="decimal-pad"
@@ -141,9 +202,17 @@ export default function LogCardioScreen() {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Save cardio"
-          onPress={saveLog}
-          style={({ pressed }) => [styles.saveButton, pressed && styles.pressed]}>
-          <Text style={styles.saveButtonLabel}>Save Cardio</Text>
+          disabled={isSaving}
+          onPress={() => {
+            void saveLog();
+          }}
+          style={({ pressed }) => [
+            styles.saveButton,
+            (pressed || isSaving) && styles.pressed,
+          ]}>
+          <Text style={styles.saveButtonLabel}>
+            {isSaving ? 'Saving...' : 'Save Cardio'}
+          </Text>
         </Pressable>
       </Screen>
     </KeyboardAvoidingView>

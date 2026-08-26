@@ -1,10 +1,15 @@
 import { useCallback, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { Link, useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
-import { formatCardioSummary, getCardioLogs, type CardioLog } from '@/lib/cardio';
+import {
+  consumeCardioSaveNotice,
+  formatCardioSummary,
+  type CardioSession,
+} from '@/lib/cardio';
+import { supabase } from '@/lib/supabase';
 import { formatWorkoutDate } from '@/lib/workout-format';
 
 const palette = Colors.dark;
@@ -16,18 +21,55 @@ const todayStats = [
 ];
 
 export default function CardioScreen() {
-  const [recentLogs, setRecentLogs] = useState<CardioLog[]>(getCardioLogs());
+  const router = useRouter();
+  const [sessions, setSessions] = useState<CardioSession[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  const loadSessions = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('cardio_sessions')
+      .select(
+        'id, activity_type, started_at, duration_minutes, distance_km, incline_percent, speed_kmh, calories, notes',
+      )
+      .order('started_at', { ascending: false });
+
+    if (error) {
+      setErrorMessage(error.message);
+      setSessions([]);
+    } else {
+      setErrorMessage(null);
+      setSessions((data ?? []) as CardioSession[]);
+    }
+
+    setIsLoading(false);
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
-      setRecentLogs(getCardioLogs());
-    }, []),
+      const notice = consumeCardioSaveNotice();
+
+      if (notice) {
+        setSuccessMessage(notice);
+      }
+
+      void loadSessions();
+    }, [loadSessions]),
   );
 
   return (
     <Screen>
       <Text style={styles.title}>Cardio</Text>
-      <Text style={styles.subtitle}>Track daily activity and logged sessions.</Text>
+      <Text style={styles.subtitle}>
+        {isLoading
+          ? 'Loading cardio...'
+          : errorMessage
+            ? 'Could not load cardio'
+            : 'Track daily activity and logged sessions.'}
+      </Text>
+
+      {successMessage ? <Text style={styles.success}>{successMessage}</Text> : null}
 
       <Card style={styles.todayCard}>
         <Text style={styles.sectionLabel}>Today&apos;s Activity</Text>
@@ -40,25 +82,31 @@ export default function CardioScreen() {
         <Text style={styles.status}>Health Connect not connected</Text>
       </Card>
 
-      <Link href="/cardio/log" asChild>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Log Cardio"
-          style={({ pressed }) => [styles.logButton, pressed && styles.pressed]}>
-          <Text style={styles.logButtonLabel}>Log Cardio</Text>
-        </Pressable>
-      </Link>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Log Cardio"
+        onPress={() => router.push('/cardio/log')}
+        style={({ pressed }) => [styles.logButton, pressed && styles.pressed]}>
+        <Text style={styles.logButtonLabel}>Log Cardio</Text>
+      </Pressable>
 
       <Text style={styles.listLabel}>Recent Cardio</Text>
 
-      {recentLogs.map((log) => (
-        <Card key={log.id} style={styles.logCard}>
-          <Text style={styles.logDate}>{formatWorkoutDate(log.loggedAt)}</Text>
-          <Text style={styles.logName}>{log.activityType}</Text>
-          <Text style={styles.logSummary}>{formatCardioSummary(log)}</Text>
-          {log.notes ? <Text style={styles.logNotes}>{log.notes}</Text> : null}
-        </Card>
-      ))}
+      {isLoading ? (
+        <Text style={styles.status}>Loading cardio sessions...</Text>
+      ) : errorMessage ? (
+        <Text style={styles.error}>Could not load cardio sessions. {errorMessage}</Text>
+      ) : sessions.length === 0 ? (
+        <Text style={styles.status}>No cardio sessions yet.</Text>
+      ) : (
+        sessions.map((session) => (
+          <Card key={session.id} style={styles.logCard}>
+            <Text style={styles.logDate}>{formatWorkoutDate(session.started_at)}</Text>
+            <Text style={styles.logName}>{session.activity_type}</Text>
+            <Text style={styles.logSummary}>{formatCardioSummary(session)}</Text>
+          </Card>
+        ))
+      )}
     </Screen>
   );
 }
@@ -73,6 +121,11 @@ const styles = StyleSheet.create({
     color: palette.muted,
     fontSize: 16,
     marginBottom: 4,
+  },
+  success: {
+    color: palette.accent,
+    fontSize: 16,
+    fontWeight: '700',
   },
   todayCard: {
     gap: 12,
@@ -103,6 +156,10 @@ const styles = StyleSheet.create({
     color: palette.muted,
     fontSize: 16,
     marginTop: 4,
+  },
+  error: {
+    color: palette.text,
+    fontSize: 16,
   },
   logButton: {
     backgroundColor: palette.accent,
@@ -144,10 +201,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   logSummary: {
-    color: palette.muted,
-    fontSize: 16,
-  },
-  logNotes: {
     color: palette.muted,
     fontSize: 16,
   },

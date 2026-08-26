@@ -1,100 +1,103 @@
 export const CARDIO_ACTIVITY_TYPES = [
-  'Walking',
   'Incline Walk',
+  'Treadmill Walk',
+  'Outdoor Walk',
   'Running',
   'Cycling',
   'Swimming',
+  'Stair Climber',
   'Elliptical',
   'Other',
 ] as const;
 
 export type CardioActivityType = (typeof CARDIO_ACTIVITY_TYPES)[number];
 
-export type CardioLog = {
+export type CardioSession = {
   id: string;
-  activityType: CardioActivityType;
-  durationMinutes: number;
-  distance: string | null;
-  speed: string | null;
-  incline: string | null;
-  calories: string | null;
+  activity_type: string;
+  started_at: string;
+  duration_minutes: number;
+  distance_km: number | null;
+  incline_percent: number | null;
+  speed_kmh: number | null;
+  calories: number | null;
   notes: string | null;
-  loggedAt: string;
 };
 
-export type CardioLogInput = Omit<CardioLog, 'id' | 'loggedAt'>;
-
-const placeholderLogs: CardioLog[] = [
-  {
-    id: 'placeholder-1',
-    activityType: 'Incline Walk',
-    durationMinutes: 32,
-    distance: '1.6',
-    speed: null,
-    incline: '8',
-    calories: '214',
-    notes: null,
-    loggedAt: '2026-08-19T18:10:00.000Z',
-  },
-  {
-    id: 'placeholder-2',
-    activityType: 'Walking',
-    durationMinutes: 24,
-    distance: '1.1',
-    speed: '2.8',
-    incline: null,
-    calories: null,
-    notes: null,
-    loggedAt: '2026-08-18T12:40:00.000Z',
-  },
-  {
-    id: 'placeholder-3',
-    activityType: 'Cycling',
-    durationMinutes: 45,
-    distance: '10.2',
-    speed: '13.6',
-    incline: null,
-    calories: '380',
-    notes: 'Easy spin',
-    loggedAt: '2026-08-16T09:05:00.000Z',
-  },
-];
-
-let cardioLogs: CardioLog[] = [...placeholderLogs];
-
-export function getCardioLogs(): CardioLog[] {
-  return cardioLogs;
+export function isCardioActivityType(value: string): value is CardioActivityType {
+  return (CARDIO_ACTIVITY_TYPES as readonly string[]).includes(value);
 }
 
-export function addCardioLog(input: CardioLogInput): CardioLog {
-  const nextLog: CardioLog = {
-    ...input,
-    id: `local-${Date.now()}`,
-    loggedAt: new Date().toISOString(),
-  };
+export type ParsedOptionalNumber =
+  | { ok: true; value: number | null }
+  | { ok: false };
 
-  cardioLogs = [nextLog, ...cardioLogs];
-  return nextLog;
+export function parseOptionalNumber(value: string): ParsedOptionalNumber {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return { ok: true, value: null };
+  }
+
+  const parsed = Number(trimmed);
+
+  if (!Number.isFinite(parsed)) {
+    return { ok: false };
+  }
+
+  return { ok: true, value: parsed };
 }
 
-export function formatCardioSummary(log: CardioLog): string {
-  const parts = [`${log.durationMinutes} min`];
-
-  if (log.distance) {
-    parts.push(`${log.distance} mi`);
+export function formatCardioNumber(value: number | string | null): string | null {
+  if (value === null || value === '') {
+    return null;
   }
 
-  if (log.speed) {
-    parts.push(`${log.speed} mph`);
+  const numericValue = Number(value);
+
+  if (!Number.isFinite(numericValue)) {
+    return null;
   }
 
-  if (log.incline) {
-    parts.push(`${log.incline}% incline`);
+  return Number.isInteger(numericValue)
+    ? String(numericValue)
+    : String(Number(numericValue.toFixed(2)));
+}
+
+export function formatCardioSummary(session: CardioSession): string {
+  const parts = [`${formatCardioNumber(session.duration_minutes) ?? session.duration_minutes} min`];
+  const distance = formatCardioNumber(session.distance_km);
+  const incline = formatCardioNumber(session.incline_percent);
+  const speed = formatCardioNumber(session.speed_kmh);
+  const calories = formatCardioNumber(session.calories);
+
+  if (distance) {
+    parts.push(`${distance} km`);
   }
 
-  if (log.calories) {
-    parts.push(`${log.calories} cal`);
+  if (incline) {
+    parts.push(`${incline}% incline`);
+  }
+
+  if (speed) {
+    parts.push(`${speed} km/h`);
+  }
+
+  if (calories) {
+    parts.push(`${calories} cal`);
   }
 
   return parts.join(' · ');
+}
+
+let saveNotice: string | null = null;
+
+export function setCardioSaveNotice() {
+  saveNotice = 'Cardio session saved.';
+}
+
+export function consumeCardioSaveNotice(): string | null {
+  const notice = saveNotice;
+  saveNotice = null;
+  return notice;
 }

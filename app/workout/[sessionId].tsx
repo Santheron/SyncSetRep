@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   KeyboardAvoidingView,
   Platform,
@@ -14,85 +14,19 @@ import { Card, Screen } from '@/components/screen';
 import { RestTimerCard } from '@/components/rest-timer';
 import { WarmupModal } from '@/components/warmup-modal';
 import { Colors } from '@/constants/theme';
+import { usePersistedWorkoutSets } from '@/hooks/use-persisted-workout-sets';
 import { useRestTimer } from '@/hooks/use-rest-timer';
-import { supabase } from '@/lib/supabase';
 import { parsePositiveWeight } from '@/lib/warmup';
+import {
+  finishWorkoutSession,
+  loadActiveWorkout,
+  setKey,
+  type ProgramExercise,
+  type WorkoutSetRecord,
+} from '@/lib/workout-session';
 
 const palette = Colors.dark;
-
-type ProgramDay = {
-  id: string;
-  name: string;
-  subtitle: string;
-};
-
-type Exercise = {
-  id: string;
-  name: string;
-  category: string;
-  exercise_type: string;
-  equipment_type: string | null;
-  warmup_enabled: boolean | null;
-  min_weight: number | null;
-  weight_increment: number | null;
-};
-
-type ProgramExerciseRow = {
-  id: string;
-  exercise_order: number;
-  target_sets: number;
-  min_reps: number;
-  max_reps: number;
-  notes: string | null;
-  exercise: Exercise | Exercise[] | null;
-};
-
-type ProgramExercise = {
-  id: string;
-  exercise_order: number;
-  target_sets: number;
-  min_reps: number;
-  max_reps: number;
-  notes: string | null;
-  exercise: Exercise | null;
-};
-
-type SetInputs = {
-  weight: string;
-  reps: string;
-};
-
-function unwrapExercise(value: Exercise | Exercise[] | null): Exercise | null {
-  if (!value) {
-    return null;
-  }
-
-  return Array.isArray(value) ? (value[0] ?? null) : value;
-}
-
-function setKey(exerciseId: string, setNumber: number) {
-  return `${exerciseId}:${setNumber}`;
-}
-
-function parseWeight(value: string): number | null {
-  const parsed = Number(value.trim());
-
-  if (!value.trim() || !Number.isFinite(parsed) || parsed < 0) {
-    return null;
-  }
-
-  return parsed;
-}
-
-function parseReps(value: string): number | null {
-  const parsed = Number(value.trim());
-
-  if (!value.trim() || !Number.isInteger(parsed) || parsed < 0) {
-    return null;
-  }
-
-  return parsed;
-}
+const EMPTY_SETS: WorkoutSetRecord[] = [];
 
 export default function ActiveWorkoutScreen() {
   const router = useRouter();
@@ -101,107 +35,62 @@ export default function ActiveWorkoutScreen() {
   }>();
   const sessionId = Array.isArray(sessionIdParam) ? sessionIdParam[0] : sessionIdParam;
 
-  const [programDay, setProgramDay] = useState<ProgramDay | null>(null);
+  const [programDayName, setProgramDayName] = useState<string | null>(null);
+  const [programDaySubtitle, setProgramDaySubtitle] = useState<string | null>(null);
   const [exercises, setExercises] = useState<ProgramExercise[]>([]);
-  const [inputs, setInputs] = useState<Record<string, SetInputs>>({});
-  const [completedSets, setCompletedSets] = useState<Record<string, boolean>>({});
-  const [setErrors, setSetErrors] = useState<Record<string, string>>({});
+  const [initialSets, setInitialSets] = useState<WorkoutSetRecord[]>(EMPTY_SETS);
+  const [isFinished, setIsFinished] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isFinishing, setIsFinishing] = useState(false);
+  const [loadedSessionId, setLoadedSessionId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [finishError, setFinishError] = useState<string | null>(null);
   const [warmupExerciseId, setWarmupExerciseId] = useState<string | null>(null);
 
-  const pendingSetsRef = useRef(new Set<string>());
-  const completedSetsRef = useRef(new Set<string>());
   const restTimer = useRestTimer();
   const startRestTimer = restTimer.start;
+  const isReady = Boolean(sessionId) && loadedSessionId === sessionId && !errorMessage;
+  const persisted = usePersistedWorkoutSets(sessionId, initialSets, isFinished, isReady);
+  const { inputs, completedSets, setErrors, updateInput, completeSet, flushAll } = persisted;
 
   useEffect(() => {
     if (!sessionId) {
       setIsLoading(false);
+      setLoadedSessionId(null);
       setErrorMessage('Missing workout session.');
       return;
     }
 
+    const id = sessionId;
     let isMounted = true;
 
     async function loadWorkout() {
-      const { data: session, error: sessionError } = await supabase
-        .from('workout_sessions')
-        .select('id, program_day_id')
-        .eq('id', sessionId)
-        .single();
+      setIsLoading(true);
+      const result = await loadActiveWorkout(id);
 
       if (!isMounted) {
         return;
       }
 
-      if (sessionError || !session) {
-        setErrorMessage(sessionError?.message ?? 'Workout session not found.');
+      if (!result.ok) {
+        setErrorMessage(result.error);
+        setProgramDayName(null);
+        setProgramDaySubtitle(null);
+        setExercises([]);
+        setInitialSets(EMPTY_SETS);
+        setIsFinished(false);
+        setLoadedSessionId(null);
         setIsLoading(false);
         return;
       }
-
-      const [dayResult, exercisesResult] = await Promise.all([
-        supabase
-          .from('program_days')
-          .select('id, name, subtitle')
-          .eq('id', session.program_day_id)
-          .single(),
-        supabase
-          .from('program_exercises')
-          .select(
-            `
-            id,
-            exercise_order,
-            target_sets,
-            min_reps,
-            max_reps,
-            notes,
-            exercise:exercises (
-              id,
-              name,
-              category,
-              exercise_type,
-              equipment_type,
-              warmup_enabled,
-              min_weight,
-              weight_increment
-            )
-          `,
-          )
-          .eq('program_day_id', session.program_day_id)
-          .order('exercise_order', { ascending: true }),
-      ]);
-
-      if (!isMounted) {
-        return;
-      }
-
-      if (dayResult.error) {
-        setErrorMessage(dayResult.error.message);
-        setIsLoading(false);
-        return;
-      }
-
-      if (exercisesResult.error) {
-        setErrorMessage(exercisesResult.error.message);
-        setProgramDay(dayResult.data);
-        setIsLoading(false);
-        return;
-      }
-
-      const rows = (exercisesResult.data ?? []) as ProgramExerciseRow[];
 
       setErrorMessage(null);
-      setProgramDay(dayResult.data);
-      setExercises(
-        rows.map((row) => ({
-          ...row,
-          exercise: unwrapExercise(row.exercise),
-        })),
-      );
+      setProgramDayName(result.data.programDay.name);
+      setProgramDaySubtitle(result.data.programDay.subtitle);
+      setExercises(result.data.exercises);
+      setInitialSets(result.data.sets);
+      setIsFinished(Boolean(result.data.finishedAt));
+      setLoadedSessionId(id);
       setIsLoading(false);
     }
 
@@ -211,17 +100,6 @@ export default function ActiveWorkoutScreen() {
       isMounted = false;
     };
   }, [sessionId]);
-
-  function updateInput(key: string, field: keyof SetInputs, value: string) {
-    setInputs((current) => ({
-      ...current,
-      [key]: {
-        weight: current[key]?.weight ?? '',
-        reps: current[key]?.reps ?? '',
-        [field]: value,
-      },
-    }));
-  }
 
   function getEnteredWorkingWeight(exerciseId: string, setCount: number): number | null {
     for (let setNumber = 1; setNumber <= setCount; setNumber += 1) {
@@ -237,78 +115,28 @@ export default function ActiveWorkoutScreen() {
     return null;
   }
 
-  async function completeSet(exerciseId: string, setNumber: number) {
-    if (!sessionId) {
-      return;
+  async function handleCompleteSet(exerciseId: string, setNumber: number) {
+    const result = await completeSet(exerciseId, setNumber);
+
+    if (result.ok) {
+      startRestTimer();
     }
-
-    const key = setKey(exerciseId, setNumber);
-
-    if (completedSetsRef.current.has(key) || pendingSetsRef.current.has(key)) {
-      return;
-    }
-
-    const weight = parseWeight(inputs[key]?.weight ?? '');
-    const reps = parseReps(inputs[key]?.reps ?? '');
-
-    if (weight === null || reps === null) {
-      setSetErrors((current) => ({
-        ...current,
-        [key]: 'Enter weight and reps before completing this set.',
-      }));
-      return;
-    }
-
-    pendingSetsRef.current.add(key);
-    setSetErrors((current) => {
-      const next = { ...current };
-      delete next[key];
-      return next;
-    });
-
-    const { error } = await supabase.from('workout_sets').insert({
-      workout_session_id: sessionId,
-      exercise_id: exerciseId,
-      set_number: setNumber,
-      weight,
-      reps,
-      rir: null,
-      is_completed: true,
-    });
-
-    if (error) {
-      pendingSetsRef.current.delete(key);
-      setSetErrors((current) => ({
-        ...current,
-        [key]: error.message,
-      }));
-      return;
-    }
-
-    completedSetsRef.current.add(key);
-    pendingSetsRef.current.delete(key);
-    setCompletedSets((current) => ({
-      ...current,
-      [key]: true,
-    }));
-    startRestTimer();
   }
 
-  async function finishWorkout() {
-    if (!sessionId || isFinishing) {
+  async function handleFinishWorkout() {
+    if (!sessionId || isFinishing || isFinished) {
       return;
     }
 
     setIsFinishing(true);
     setFinishError(null);
 
-    const { error } = await supabase
-      .from('workout_sessions')
-      .update({ finished_at: new Date().toISOString() })
-      .eq('id', sessionId);
+    await flushAll();
 
-    if (error) {
-      setFinishError(error.message);
+    const result = await finishWorkoutSession(sessionId);
+
+    if (!result.ok) {
+      setFinishError(result.error);
       setIsFinishing(false);
       return;
     }
@@ -327,7 +155,7 @@ export default function ActiveWorkoutScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <Stack.Screen
         options={{
-          title: programDay?.name ?? 'Workout',
+          title: programDayName ?? 'Workout',
           headerBackTitle: 'Workout',
         }}
       />
@@ -346,7 +174,7 @@ export default function ActiveWorkoutScreen() {
 
       <Screen keyboardShouldPersistTaps="handled">
         <View>
-          <Text style={styles.kicker}>{programDay?.name ?? 'Workout'}</Text>
+          <Text style={styles.kicker}>{programDayName ?? 'Workout'}</Text>
           <Text style={styles.title}>Active Workout</Text>
         </View>
         <Text style={styles.subtitle}>
@@ -354,7 +182,9 @@ export default function ActiveWorkoutScreen() {
             ? 'Loading workout...'
             : errorMessage
               ? 'Could not load workout'
-              : programDay?.subtitle}
+              : isFinished
+                ? 'This workout is already finished.'
+                : programDaySubtitle}
         </Text>
 
         {isLoading ? (
@@ -365,7 +195,7 @@ export default function ActiveWorkoutScreen() {
           exercises.map((item) => {
             const exerciseId = item.exercise?.id;
             const notes = item.notes?.trim();
-            const setCount = item.target_sets;
+            const setCount = item.targetSets;
 
             return (
               <Card key={item.id} style={styles.exerciseCard}>
@@ -373,7 +203,7 @@ export default function ActiveWorkoutScreen() {
                   <Text style={styles.exerciseName}>
                     {item.exercise?.name ?? 'Unknown exercise'}
                   </Text>
-                  {item.exercise?.warmup_enabled ? (
+                  {item.exercise?.warmupEnabled ? (
                     <Pressable
                       accessibilityRole="button"
                       accessibilityLabel={`Warm up ${item.exercise.name}`}
@@ -390,7 +220,7 @@ export default function ActiveWorkoutScreen() {
                   <Text style={styles.exerciseMeta}>{item.exercise.category}</Text>
                 ) : null}
                 <Text style={styles.exerciseMeta}>
-                  {setCount} sets · {item.min_reps}–{item.max_reps} reps
+                  {setCount} sets · {item.minReps}–{item.maxReps} reps
                 </Text>
                 {notes ? <Text style={styles.exerciseMeta}>{notes}</Text> : null}
 
@@ -399,7 +229,8 @@ export default function ActiveWorkoutScreen() {
                       const setNumber = index + 1;
                       const key = setKey(exerciseId, setNumber);
                       const isCompleted = Boolean(completedSets[key]);
-                      const values = inputs[key] ?? { weight: '', reps: '' };
+                      const values = inputs[key] ?? { weight: '', reps: '', rir: '' };
+                      const inputsDisabled = isCompleted || isFinished;
 
                       return (
                         <View key={key} style={styles.setBlock}>
@@ -407,23 +238,42 @@ export default function ActiveWorkoutScreen() {
                           <View style={styles.setRow}>
                             <TextInput
                               accessibilityLabel={`Set ${setNumber} weight`}
-                              editable={!isCompleted}
+                              editable={!inputsDisabled}
                               keyboardType="decimal-pad"
                               onChangeText={(value) => updateInput(key, 'weight', value)}
                               placeholder="Weight"
                               placeholderTextColor={palette.muted}
-                              style={[styles.setInput, isCompleted && styles.setInputDisabled]}
+                              style={[
+                                styles.setInput,
+                                inputsDisabled && styles.setInputDisabled,
+                              ]}
                               value={values.weight}
                             />
                             <TextInput
                               accessibilityLabel={`Set ${setNumber} reps`}
-                              editable={!isCompleted}
+                              editable={!inputsDisabled}
                               keyboardType="number-pad"
                               onChangeText={(value) => updateInput(key, 'reps', value)}
                               placeholder="Reps"
                               placeholderTextColor={palette.muted}
-                              style={[styles.setInput, isCompleted && styles.setInputDisabled]}
+                              style={[
+                                styles.setInput,
+                                inputsDisabled && styles.setInputDisabled,
+                              ]}
                               value={values.reps}
+                            />
+                            <TextInput
+                              accessibilityLabel={`Set ${setNumber} RIR`}
+                              editable={!inputsDisabled}
+                              keyboardType="number-pad"
+                              onChangeText={(value) => updateInput(key, 'rir', value)}
+                              placeholder="RIR"
+                              placeholderTextColor={palette.muted}
+                              style={[
+                                styles.rirInput,
+                                inputsDisabled && styles.setInputDisabled,
+                              ]}
+                              value={values.rir}
                             />
                             <Pressable
                               accessibilityRole="button"
@@ -432,14 +282,14 @@ export default function ActiveWorkoutScreen() {
                                   ? `Set ${setNumber} completed`
                                   : `Complete set ${setNumber}`
                               }
-                              disabled={isCompleted}
+                              disabled={isCompleted || isFinished}
                               onPress={() => {
-                                void completeSet(exerciseId, setNumber);
+                                void handleCompleteSet(exerciseId, setNumber);
                               }}
                               style={({ pressed }) => [
                                 styles.completeButton,
                                 isCompleted && styles.completeButtonDone,
-                                pressed && !isCompleted && styles.pressed,
+                                pressed && !isCompleted && !isFinished && styles.pressed,
                               ]}>
                               <Text
                                 style={[
@@ -465,16 +315,16 @@ export default function ActiveWorkoutScreen() {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Finish Workout"
-          disabled={isFinishing || !sessionId}
+          disabled={isFinishing || !sessionId || isFinished}
           onPress={() => {
-            void finishWorkout();
+            void handleFinishWorkout();
           }}
           style={({ pressed }) => [
             styles.finishButton,
-            (pressed || isFinishing) && styles.pressed,
+            (pressed || isFinishing || isFinished) && styles.pressed,
           ]}>
           <Text style={styles.finishButtonLabel}>
-            {isFinishing ? 'Finishing...' : 'Finish Workout'}
+            {isFinished ? 'Finished' : isFinishing ? 'Finishing...' : 'Finish Workout'}
           </Text>
         </Pressable>
 
@@ -486,13 +336,13 @@ export default function ActiveWorkoutScreen() {
       <WarmupModal
         visible={warmupExerciseId !== null && warmupExercise !== null}
         exerciseName={warmupExercise?.name ?? ''}
-        equipmentType={warmupExercise?.equipment_type ?? null}
-        warmupEnabled={Boolean(warmupExercise?.warmup_enabled)}
-        minWeight={warmupExercise?.min_weight ?? null}
-        weightIncrement={warmupExercise?.weight_increment ?? null}
+        equipmentType={warmupExercise?.equipmentType ?? null}
+        warmupEnabled={Boolean(warmupExercise?.warmupEnabled)}
+        minWeight={warmupExercise?.minWeight ?? null}
+        weightIncrement={warmupExercise?.weightIncrement ?? null}
         initialWorkingWeight={
           warmupExercise
-            ? getEnteredWorkingWeight(warmupExercise.id, warmupItem?.target_sets ?? 0)
+            ? getEnteredWorkingWeight(warmupExercise.id, warmupItem?.targetSets ?? 0)
             : null
         }
         onClose={() => setWarmupExerciseId(null)}
@@ -580,6 +430,7 @@ const styles = StyleSheet.create({
   setRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     gap: 8,
   },
   setInput: {
@@ -593,17 +444,29 @@ const styles = StyleSheet.create({
     fontSize: 16,
     paddingHorizontal: 12,
   },
+  rirInput: {
+    width: 58,
+    minHeight: 48,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.background,
+    color: palette.text,
+    fontSize: 16,
+    paddingHorizontal: 8,
+    textAlign: 'center',
+  },
   setInputDisabled: {
     opacity: 0.7,
   },
   completeButton: {
     minHeight: 48,
-    minWidth: 108,
+    minWidth: 96,
     borderRadius: 12,
     backgroundColor: palette.accent,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
   },
   completeButtonDone: {
     backgroundColor: palette.background,

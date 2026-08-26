@@ -1,105 +1,199 @@
-import { useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useCallback, useState } from 'react';
+import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useFocusEffect, useRouter } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
-import { supabase } from '@/lib/supabase';
+import { formatWorkoutDate } from '@/lib/workout-format';
+import {
+  discardUnfinishedSessions,
+  getLatestUnfinishedSession,
+  type UnfinishedSession,
+} from '@/lib/workout-session';
 
 const palette = Colors.dark;
 
-const placeholderExercises = [
-  { name: 'Bench Press', detail: '4 sets · 6–8 reps' },
-  { name: 'Incline Dumbbell Press', detail: '3 sets · 8–10 reps' },
-  { name: 'Chest-Supported Row', detail: '4 sets · 8–10 reps' },
-  { name: 'Lat Pulldown', detail: '3 sets · 10–12 reps' },
-  { name: 'Overhead Press', detail: '3 sets · 8–10 reps' },
-];
-
 export default function WorkoutScreen() {
   const router = useRouter();
-  const [isStarting, setIsStarting] = useState(false);
-  const [startError, setStartError] = useState<string | null>(null);
+  const [activeSession, setActiveSession] = useState<UnfinishedSession | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isWorking, setIsWorking] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  async function startWorkout() {
-    if (isStarting) {
+  useFocusEffect(
+    useCallback(() => {
+      let isMounted = true;
+
+      async function load() {
+        setIsLoading(true);
+        const result = await getLatestUnfinishedSession();
+
+        if (!isMounted) {
+          return;
+        }
+
+        if (!result.ok) {
+          setErrorMessage(result.error);
+          setActiveSession(null);
+        } else {
+          setErrorMessage(null);
+          setActiveSession(result.data);
+        }
+
+        setIsLoading(false);
+      }
+
+      void load();
+
+      return () => {
+        isMounted = false;
+      };
+    }, []),
+  );
+
+  function openSession(sessionId: string) {
+    router.push({
+      pathname: '/workout/[sessionId]',
+      params: { sessionId },
+    });
+  }
+
+  function openDaySelect() {
+    router.push('/workout/select');
+  }
+
+  function resumeWorkout() {
+    if (!activeSession || isWorking) {
       return;
     }
 
-    setIsStarting(true);
-    setStartError(null);
-
-    try {
-      const { data: programDay, error: dayError } = await supabase
-        .from('program_days')
-        .select('id')
-        .order('day_order', { ascending: true })
-        .limit(1)
-        .single();
-
-      if (dayError || !programDay) {
-        setStartError(dayError?.message ?? 'No program day found.');
-        return;
-      }
-
-      const { data: session, error: sessionError } = await supabase
-        .from('workout_sessions')
-        .insert({
-          program_day_id: programDay.id,
-          started_at: new Date().toISOString(),
-        })
-        .select('id')
-        .single();
-
-      if (sessionError || !session) {
-        setStartError(sessionError?.message ?? 'Could not start workout.');
-        return;
-      }
-
-      router.push({
-        pathname: '/workout/[sessionId]',
-        params: { sessionId: String(session.id) },
-      });
-    } finally {
-      setIsStarting(false);
-    }
+    openSession(activeSession.id);
   }
+
+  async function discardAndStartNew() {
+    if (isWorking) {
+      return;
+    }
+
+    setIsWorking(true);
+    setErrorMessage(null);
+
+    const result = await discardUnfinishedSessions();
+
+    if (!result.ok) {
+      setErrorMessage(result.error);
+      setIsWorking(false);
+      const activeResult = await getLatestUnfinishedSession();
+
+      if (activeResult.ok) {
+        setActiveSession(activeResult.data);
+      }
+
+      return;
+    }
+
+    setActiveSession(null);
+    setIsWorking(false);
+    openDaySelect();
+  }
+
+  function requestStartWorkout() {
+    if (isWorking || isLoading) {
+      return;
+    }
+
+    if (!activeSession) {
+      openDaySelect();
+      return;
+    }
+
+    Alert.alert(
+      'Unfinished workout',
+      `You already have ${activeSession.name} in progress. Resume it, discard it and start a new workout, or cancel.`,
+      [
+        {
+          text: 'Resume existing workout',
+          onPress: resumeWorkout,
+        },
+        {
+          text: 'Discard existing workout and start a new one',
+          style: 'destructive',
+          onPress: () => {
+            void discardAndStartNew();
+          },
+        },
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+      ],
+    );
+  }
+
+  const hasActiveSession = activeSession !== null;
 
   return (
     <Screen>
       <View>
-        <Text style={styles.kicker}>Upper</Text>
-        <Text style={styles.title}>Today&apos;s Workout</Text>
+        <Text style={styles.kicker}>
+          {isLoading ? 'Workout' : hasActiveSession ? activeSession.name : 'Workout'}
+        </Text>
+        <Text style={styles.title}>
+          {hasActiveSession ? 'Workout in progress' : "Today's Workout"}
+        </Text>
       </View>
+
+      {hasActiveSession ? (
+        <Card style={styles.activeCard}>
+          <Text style={styles.activeLabel}>Resume Workout</Text>
+          <Text style={styles.activeName}>{activeSession.name}</Text>
+          {activeSession.subtitle ? (
+            <Text style={styles.activeDetail}>{activeSession.subtitle}</Text>
+          ) : null}
+          <Text style={styles.activeDetail}>
+            Started {formatWorkoutDate(activeSession.startedAt)}
+          </Text>
+        </Card>
+      ) : (
+        <Text style={styles.helper}>
+          {isLoading
+            ? 'Checking for an in-progress workout...'
+            : 'Choose a program day to start. Leaving the workout screen will keep your sets saved.'}
+        </Text>
+      )}
+
+      {hasActiveSession ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Resume Workout"
+          disabled={isWorking}
+          onPress={resumeWorkout}
+          style={({ pressed }) => [
+            styles.startButton,
+            (pressed || isWorking) && styles.pressed,
+          ]}>
+          <Text style={styles.startButtonLabel}>Resume Workout</Text>
+        </Pressable>
+      ) : null}
 
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Start Workout"
-        disabled={isStarting}
-        onPress={() => {
-          void startWorkout();
-        }}
+        disabled={isWorking || isLoading}
+        onPress={requestStartWorkout}
         style={({ pressed }) => [
-          styles.startButton,
-          (pressed || isStarting) && styles.startButtonPressed,
+          hasActiveSession ? styles.secondaryButton : styles.startButton,
+          (pressed || isWorking || isLoading) && styles.pressed,
         ]}>
-        <Text style={styles.startButtonLabel}>
-          {isStarting ? 'Starting...' : 'Start Workout'}
+        <Text
+          style={hasActiveSession ? styles.secondaryButtonLabel : styles.startButtonLabel}>
+          {isWorking ? 'Working...' : 'Start Workout'}
         </Text>
       </Pressable>
 
-      {startError ? (
-        <Text style={styles.error}>Could not start workout. {startError}</Text>
+      {errorMessage ? (
+        <Text style={styles.error}>Could not load workout. {errorMessage}</Text>
       ) : null}
-
-      <Text style={styles.sectionLabel}>Exercises</Text>
-
-      {placeholderExercises.map((exercise) => (
-        <Card key={exercise.name} style={styles.exerciseCard}>
-          <Text style={styles.exerciseName}>{exercise.name}</Text>
-          <Text style={styles.exerciseDetail}>{exercise.detail}</Text>
-        </Card>
-      ))}
     </Screen>
   );
 }
@@ -118,6 +212,30 @@ const styles = StyleSheet.create({
     fontSize: 32,
     fontWeight: '800',
   },
+  helper: {
+    color: palette.muted,
+    fontSize: 16,
+  },
+  activeCard: {
+    gap: 4,
+  },
+  activeLabel: {
+    color: palette.accent,
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  activeName: {
+    color: palette.text,
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  activeDetail: {
+    color: palette.muted,
+    fontSize: 16,
+  },
   startButton: {
     backgroundColor: palette.accent,
     minHeight: 64,
@@ -126,11 +244,23 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 18,
   },
-  startButtonPressed: {
-    opacity: 0.85,
-  },
   startButtonLabel: {
     color: palette.accentText,
+    fontSize: 20,
+    fontWeight: '800',
+  },
+  secondaryButton: {
+    minHeight: 64,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 18,
+    borderWidth: 1,
+    borderColor: palette.accent,
+    backgroundColor: palette.background,
+  },
+  secondaryButtonLabel: {
+    color: palette.accent,
     fontSize: 20,
     fontWeight: '800',
   },
@@ -138,26 +268,7 @@ const styles = StyleSheet.create({
     color: palette.text,
     fontSize: 16,
   },
-  sectionLabel: {
-    color: palette.muted,
-    fontSize: 14,
-    fontWeight: '700',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    marginTop: 8,
-  },
-  exerciseCard: {
-    minHeight: 72,
-    justifyContent: 'center',
-    gap: 4,
-  },
-  exerciseName: {
-    color: palette.text,
-    fontSize: 20,
-    fontWeight: '700',
-  },
-  exerciseDetail: {
-    color: palette.muted,
-    fontSize: 16,
+  pressed: {
+    opacity: 0.85,
   },
 });
