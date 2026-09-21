@@ -101,7 +101,17 @@ export default function ProgramDayScreen() {
       }
 
       if (dayResult.error) {
-        setErrorMessage(dayResult.error.message);
+        console.error('[ProgramDays] query error', {
+          code: dayResult.error.code,
+          message: dayResult.error.message,
+          details: dayResult.error.details,
+          hint: dayResult.error.hint,
+        });
+        setErrorMessage(
+          [dayResult.error.code, dayResult.error.message, dayResult.error.details, dayResult.error.hint]
+            .filter(Boolean)
+            .join(' | '),
+        );
         setProgramDay(null);
         setExercises([]);
         setIsLoading(false);
@@ -109,7 +119,22 @@ export default function ProgramDayScreen() {
       }
 
       if (exercisesResult.error) {
-        setErrorMessage(exercisesResult.error.message);
+        console.error('[ProgramExercises] query error', {
+          code: exercisesResult.error.code,
+          message: exercisesResult.error.message,
+          details: exercisesResult.error.details,
+          hint: exercisesResult.error.hint,
+        });
+        setErrorMessage(
+          [
+            exercisesResult.error.code,
+            exercisesResult.error.message,
+            exercisesResult.error.details,
+            exercisesResult.error.hint,
+          ]
+            .filter(Boolean)
+            .join(' | '),
+        );
         setProgramDay(dayResult.data);
         setExercises([]);
         setIsLoading(false);

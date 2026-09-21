@@ -34,7 +34,17 @@ export default function ProgramScreen() {
       }
 
       if (error) {
-        setErrorMessage(error.message);
+        console.error('[ProgramDays] query error', {
+          code: error.code,
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+        });
+        setErrorMessage(
+          [error.code, error.message, error.details, error.hint]
+            .filter(Boolean)
+            .join(' | '),
+        );
         setProgramDays([]);
       } else {
         setErrorMessage(null);
@@ -58,7 +68,7 @@ export default function ProgramScreen() {
         {isLoading
           ? 'Loading program...'
           : errorMessage
-            ? 'Could not load program'
+            ? errorMessage
             : `${programDays.length}-day split`}
       </Text>
 

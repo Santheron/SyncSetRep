@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { StyleSheet, Text } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import { Stack, useLocalSearchParams } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
@@ -30,6 +30,8 @@ type WorkoutSetRow = {
   set_number: number;
   weight: number | null;
   reps: number | null;
+  rir: number | null;
+  is_completed: boolean | null;
   exercise: ExerciseRef | ExerciseRef[] | null;
 };
 
@@ -43,6 +45,7 @@ type HistorySet = {
   setNumber: number;
   weight: number | null;
   reps: number | null;
+  rir: number | null;
 };
 
 type ExerciseGroup = {
@@ -74,6 +77,7 @@ function groupSets(
       setNumber: row.set_number,
       weight: row.weight,
       reps: row.reps,
+      rir: row.rir,
     };
 
     if (existing) {
@@ -146,7 +150,7 @@ export default function HistoryDetailScreen() {
         `,
         )
         .eq('id', sessionId)
-        .single();
+        .maybeSingle();
 
       if (!isMounted) {
         return;
@@ -168,6 +172,8 @@ export default function HistoryDetailScreen() {
             set_number,
             weight,
             reps,
+            rir,
+            is_completed,
             exercise:exercises (
               id,
               name,
@@ -176,6 +182,7 @@ export default function HistoryDetailScreen() {
           `,
           )
           .eq('workout_session_id', sessionId)
+          .eq('is_completed', true)
           .order('set_number', { ascending: true }),
         supabase
           .from('program_exercises')
@@ -259,9 +266,15 @@ export default function HistoryDetailScreen() {
             <Card key={exercise.exerciseId} style={styles.exerciseCard}>
               <Text style={styles.exerciseName}>{exercise.name}</Text>
               {exercise.sets.map((set) => (
-                <Text key={set.id} style={styles.setLine}>
-                  Set {set.setNumber} — {formatSetLoad(set.weight)} × {set.reps ?? 0}
-                </Text>
+                <View key={set.id} style={styles.setBlock}>
+                  <Text style={styles.setHeading}>Set {set.setNumber}</Text>
+                  <Text style={styles.setLine}>
+                    {set.weight !== null && Number(set.weight) > 0
+                      ? `${formatSetLoad(set.weight)} × ${set.reps ?? 0}`
+                      : `${set.reps ?? 0} reps`}
+                  </Text>
+                  {set.rir !== null ? <Text style={styles.setRir}>RIR {set.rir}</Text> : null}
+                </View>
               ))}
             </Card>
           ))}
@@ -314,8 +327,21 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     marginBottom: 4,
   },
+  setHeading: {
+    color: palette.text,
+    fontSize: 16,
+    fontWeight: '700',
+    marginTop: 8,
+  },
   setLine: {
     color: palette.muted,
     fontSize: 16,
+  },
+  setRir: {
+    color: palette.muted,
+    fontSize: 14,
+  },
+  setBlock: {
+    gap: 2,
   },
 });

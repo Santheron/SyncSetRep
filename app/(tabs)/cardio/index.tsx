@@ -1,24 +1,19 @@
 import { useCallback, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
+import { HealthConnectCard } from '@/components/health-connect-card';
 import { Colors } from '@/constants/theme';
 import {
   consumeCardioSaveNotice,
   formatCardioSummary,
+  listCardioSessions,
   type CardioSession,
 } from '@/lib/cardio';
-import { supabase } from '@/lib/supabase';
 import { formatWorkoutDate } from '@/lib/workout-format';
 
 const palette = Colors.dark;
-
-const todayStats = [
-  { label: 'Steps', value: '--' },
-  { label: 'Distance', value: '--' },
-  { label: 'Active Calories', value: '--' },
-];
 
 export default function CardioScreen() {
   const router = useRouter();
@@ -28,19 +23,14 @@ export default function CardioScreen() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const loadSessions = useCallback(async () => {
-    const { data, error } = await supabase
-      .from('cardio_sessions')
-      .select(
-        'id, activity_type, started_at, duration_minutes, distance_km, incline_percent, speed_kmh, calories, notes',
-      )
-      .order('started_at', { ascending: false });
+    const result = await listCardioSessions();
 
-    if (error) {
-      setErrorMessage(error.message);
+    if (!result.ok) {
+      setErrorMessage(result.error);
       setSessions([]);
     } else {
       setErrorMessage(null);
-      setSessions((data ?? []) as CardioSession[]);
+      setSessions(result.data);
     }
 
     setIsLoading(false);
@@ -71,16 +61,7 @@ export default function CardioScreen() {
 
       {successMessage ? <Text style={styles.success}>{successMessage}</Text> : null}
 
-      <Card style={styles.todayCard}>
-        <Text style={styles.sectionLabel}>Today&apos;s Activity</Text>
-        {todayStats.map((stat) => (
-          <View key={stat.label} style={styles.statRow}>
-            <Text style={styles.statLabel}>{stat.label}</Text>
-            <Text style={styles.statValue}>{stat.value}</Text>
-          </View>
-        ))}
-        <Text style={styles.status}>Health Connect not connected</Text>
-      </Card>
+      <HealthConnectCard />
 
       <Pressable
         accessibilityRole="button"
@@ -125,31 +106,6 @@ const styles = StyleSheet.create({
   success: {
     color: palette.accent,
     fontSize: 16,
-    fontWeight: '700',
-  },
-  todayCard: {
-    gap: 12,
-  },
-  sectionLabel: {
-    color: palette.muted,
-    fontSize: 14,
-    fontWeight: '700',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  statRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-  },
-  statLabel: {
-    color: palette.muted,
-    fontSize: 16,
-  },
-  statValue: {
-    color: palette.text,
-    fontSize: 20,
     fontWeight: '700',
   },
   status: {

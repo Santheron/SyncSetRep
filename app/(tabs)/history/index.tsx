@@ -117,7 +117,7 @@ export default function HistoryScreen() {
           : errorMessage
             ? 'Could not load history'
             : workouts.length === 0
-              ? 'Previous workouts will appear here.'
+              ? 'No workouts yet'
               : `${workouts.length} completed workouts`}
       </Text>
 
@@ -125,6 +125,8 @@ export default function HistoryScreen() {
         <Text style={styles.status}>Loading completed workouts...</Text>
       ) : errorMessage ? (
         <Text style={styles.error}>Could not load history. {errorMessage}</Text>
+      ) : workouts.length === 0 ? (
+        <Text style={styles.status}>No workouts yet</Text>
       ) : (
         workouts.map((workout) => {
           const summaryParts = [

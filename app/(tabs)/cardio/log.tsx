@@ -14,12 +14,13 @@ import { Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
 import {
   CARDIO_ACTIVITY_TYPES,
+  insertCardioSession,
   isCardioActivityType,
   parseOptionalNumber,
   setCardioSaveNotice,
+  showsTreadmillFields,
   type CardioActivityType,
 } from '@/lib/cardio';
-import { supabase } from '@/lib/supabase';
 
 const palette = Colors.dark;
 
@@ -80,8 +81,12 @@ export default function LogCardioScreen() {
     }
 
     const parsedDistance = parseOptionalField('distance', distance);
-    const parsedSpeed = parseOptionalField('speed', speed);
-    const parsedIncline = parseOptionalField('incline', incline);
+    const parsedSpeed = showsTreadmillFields(activityType)
+      ? parseOptionalField('speed', speed)
+      : null;
+    const parsedIncline = showsTreadmillFields(activityType)
+      ? parseOptionalField('incline', incline)
+      : null;
     const parsedCalories = parseOptionalField('calories', calories);
 
     if (
@@ -96,19 +101,21 @@ export default function LogCardioScreen() {
     setIsSaving(true);
     setErrorMessage(null);
 
-    const { error } = await supabase.from('cardio_sessions').insert({
+    const treadmill = showsTreadmillFields(activityType);
+
+    const result = await insertCardioSession({
       activity_type: activityType,
       started_at: new Date().toISOString(),
       duration_minutes: durationMinutes,
-      distance_km: parsedDistance,
-      incline_percent: parsedIncline,
-      speed_kmh: parsedSpeed,
+      distance: parsedDistance,
+      incline_percent: treadmill ? parsedIncline : null,
+      speed: treadmill ? parsedSpeed : null,
       calories: parsedCalories,
       notes: optionalNotes(notes),
     });
 
-    if (error) {
-      setErrorMessage(error.message);
+    if (!result.ok) {
+      setErrorMessage(result.error);
       setIsSaving(false);
       return;
     }
@@ -163,25 +170,29 @@ export default function LogCardioScreen() {
         />
         <Field
           keyboardType="decimal-pad"
-          label="Distance (km) optional"
+          label="Distance (optional)"
           onChangeText={setDistance}
-          placeholder="2.5"
+          placeholder="1.5"
           value={distance}
         />
-        <Field
-          keyboardType="decimal-pad"
-          label="Incline (%) optional"
-          onChangeText={setIncline}
-          placeholder="8"
-          value={incline}
-        />
-        <Field
-          keyboardType="decimal-pad"
-          label="Speed (km/h) optional"
-          onChangeText={setSpeed}
-          placeholder="5.5"
-          value={speed}
-        />
+        {showsTreadmillFields(activityType) ? (
+          <>
+            <Field
+              keyboardType="decimal-pad"
+              label="Speed (mph) optional"
+              onChangeText={setSpeed}
+              placeholder="3.5"
+              value={speed}
+            />
+            <Field
+              keyboardType="decimal-pad"
+              label="Incline % optional"
+              onChangeText={setIncline}
+              placeholder="8"
+              value={incline}
+            />
+          </>
+        ) : null}
         <Field
           keyboardType="decimal-pad"
           label="Calories (optional)"

@@ -62,18 +62,26 @@ export default function SelectWorkoutDayScreen() {
     setStartingDayId(day.id);
     setErrorMessage(null);
 
-    const result = await startWorkoutForDay(day.id);
+    try {
+      const result = await startWorkoutForDay(day.id);
 
-    if (!result.ok) {
-      setErrorMessage(result.error);
+      if (!result.ok) {
+        setErrorMessage(result.error);
+        setStartingDayId(null);
+        return;
+      }
+
+      router.replace({
+        pathname: '/workout/[sessionId]',
+        params: { sessionId: result.data.sessionId },
+      });
+    } catch (error) {
+      console.error('[WorkoutStart CRASH]', error);
+      setErrorMessage(
+        error instanceof Error ? error.message : 'Could not start workout.',
+      );
       setStartingDayId(null);
-      return;
     }
-
-    router.replace({
-      pathname: '/workout/[sessionId]',
-      params: { sessionId: result.data.sessionId },
-    });
   }
 
   return (
@@ -86,7 +94,7 @@ export default function SelectWorkoutDayScreen() {
         {isLoading
           ? 'Loading program days...'
           : errorMessage
-            ? 'Could not load program days'
+            ? errorMessage
             : 'Select the day you are training.'}
       </Text>
 

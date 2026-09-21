@@ -18,6 +18,7 @@ import {
   parsePositiveWeight,
   type WarmupPlan,
 } from '@/lib/warmup';
+import { calculatePlates, formatPlatesPerSideLine, isBarbellExercise } from '@/lib/plate-calculator';
 
 const palette = Colors.dark;
 
@@ -56,6 +57,8 @@ export function WarmupModal({
 
   const workingWeight = parsePositiveWeight(plannedWeight);
   const isBodyweight = normalizeEquipmentType(equipmentType) === 'bodyweight';
+  const isBarbell = isBarbellExercise({ name: exerciseName, equipmentType });
+  const workingPlates = isBarbell && workingWeight !== null ? calculatePlates(workingWeight) : null;
   const plan: WarmupPlan = calculateWarmup({
     exerciseName,
     equipmentType,
@@ -107,14 +110,42 @@ export function WarmupModal({
             </Text>
           ) : null}
 
-          {plan.sets.map((set) => (
-            <View key={set.label} style={styles.setRow}>
-              <Text style={styles.setLabel}>{set.label}</Text>
+          {plan.sets.map((set) => {
+            const plates = isBarbell ? calculatePlates(set.weight) : null;
+
+            return (
+              <View key={set.label} style={styles.setRow}>
+                <Text style={styles.setLabel}>{set.label}</Text>
+                <View style={styles.setCopy}>
+                  <Text style={styles.setValue}>
+                    {formatWeight(set.weight)} lb × {set.reps}
+                  </Text>
+                  {plates ? (
+                    <Text style={styles.plateLine}>
+                      {formatPlatesPerSideLine(plates.platesPerSide)}
+                    </Text>
+                  ) : null}
+                </View>
+              </View>
+            );
+          })}
+
+          {workingPlates ? (
+            <View style={styles.workingBlock}>
+              <Text style={styles.workingLabel}>Working</Text>
               <Text style={styles.setValue}>
-                {formatWeight(set.weight)} lb × {set.reps}
+                {formatWeight(workingPlates.requestedWeight)} lb
+              </Text>
+              {workingPlates.isExact ? null : (
+                <Text style={styles.message}>
+                  Nearest loadable: {formatWeight(workingPlates.actualWeight)} lb
+                </Text>
+              )}
+              <Text style={styles.plateLine}>
+                {formatPlatesPerSideLine(workingPlates.platesPerSide)}
               </Text>
             </View>
-          ))}
+          ) : null}
 
           {plan.message ? <Text style={styles.message}>{plan.message}</Text> : null}
 
@@ -186,10 +217,16 @@ const styles = StyleSheet.create({
     borderColor: palette.border,
     backgroundColor: palette.background,
     paddingHorizontal: 14,
+    paddingVertical: 10,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 12,
+  },
+  setCopy: {
+    flex: 1,
+    alignItems: 'flex-end',
+    gap: 2,
   },
   setLabel: {
     color: palette.accent,
@@ -200,6 +237,26 @@ const styles = StyleSheet.create({
     color: palette.text,
     fontSize: 16,
     fontWeight: '700',
+  },
+  plateLine: {
+    color: palette.muted,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  workingBlock: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: palette.accent,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 2,
+  },
+  workingLabel: {
+    color: palette.accent,
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
   },
   message: {
     color: palette.muted,

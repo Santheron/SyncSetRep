@@ -51,10 +51,10 @@ export default function WorkoutScreen() {
     }, []),
   );
 
-  function openSession(sessionId: string) {
+  function openSession(sessionId: string | number) {
     router.push({
       pathname: '/workout/[sessionId]',
-      params: { sessionId },
+      params: { sessionId: String(sessionId) },
     });
   }
 
@@ -62,12 +62,14 @@ export default function WorkoutScreen() {
     router.push('/workout/select');
   }
 
-  function resumeWorkout() {
-    if (!activeSession || isWorking) {
+  function resumeWorkout(sessionId?: string) {
+    const id = sessionId ?? activeSession?.id;
+
+    if (!id || isWorking) {
       return;
     }
 
-    openSession(activeSession.id);
+    openSession(id);
   }
 
   async function discardAndStartNew() {
@@ -97,30 +99,39 @@ export default function WorkoutScreen() {
     openDaySelect();
   }
 
-  function requestStartWorkout() {
-    if (isWorking || isLoading) {
-      return;
-    }
-
-    if (!activeSession) {
-      openDaySelect();
-      return;
-    }
-
+  function confirmOverrideAndStartNew() {
     Alert.alert(
-      'Unfinished workout',
-      `You already have ${activeSession.name} in progress. Resume it, discard it and start a new workout, or cancel.`,
+      'Discard unfinished workout?',
+      'This will discard your unfinished workout progress. Continue?',
       [
         {
-          text: 'Resume existing workout',
-          onPress: resumeWorkout,
+          text: 'Cancel',
+          style: 'cancel',
         },
         {
-          text: 'Discard existing workout and start a new one',
+          text: 'Continue',
           style: 'destructive',
           onPress: () => {
             void discardAndStartNew();
           },
+        },
+      ],
+    );
+  }
+
+  function promptUnfinishedWorkout(session: UnfinishedSession) {
+    Alert.alert(
+      'Workout in progress',
+      'You already have an unfinished workout. Do you want to resume it or override it and start a new workout?',
+      [
+        {
+          text: 'Resume Workout',
+          onPress: () => resumeWorkout(session.id),
+        },
+        {
+          text: 'Override & Start New',
+          style: 'destructive',
+          onPress: confirmOverrideAndStartNew,
         },
         {
           text: 'Cancel',
@@ -128,6 +139,33 @@ export default function WorkoutScreen() {
         },
       ],
     );
+  }
+
+  async function requestStartWorkout() {
+    if (isWorking) {
+      return;
+    }
+
+    let unfinished = activeSession;
+
+    if (isLoading) {
+      const result = await getLatestUnfinishedSession();
+
+      if (!result.ok) {
+        setErrorMessage(result.error);
+        return;
+      }
+
+      unfinished = result.data;
+      setActiveSession(result.data);
+    }
+
+    if (!unfinished) {
+      openDaySelect();
+      return;
+    }
+
+    promptUnfinishedWorkout(unfinished);
   }
 
   const hasActiveSession = activeSession !== null;
@@ -167,7 +205,7 @@ export default function WorkoutScreen() {
           accessibilityRole="button"
           accessibilityLabel="Resume Workout"
           disabled={isWorking}
-          onPress={resumeWorkout}
+          onPress={() => resumeWorkout()}
           style={({ pressed }) => [
             styles.startButton,
             (pressed || isWorking) && styles.pressed,
@@ -179,11 +217,13 @@ export default function WorkoutScreen() {
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Start Workout"
-        disabled={isWorking || isLoading}
-        onPress={requestStartWorkout}
+        disabled={isWorking}
+        onPress={() => {
+          void requestStartWorkout();
+        }}
         style={({ pressed }) => [
           hasActiveSession ? styles.secondaryButton : styles.startButton,
-          (pressed || isWorking || isLoading) && styles.pressed,
+          (pressed || isWorking) && styles.pressed,
         ]}>
         <Text
           style={hasActiveSession ? styles.secondaryButtonLabel : styles.startButtonLabel}>

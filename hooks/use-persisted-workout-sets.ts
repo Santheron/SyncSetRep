@@ -62,6 +62,7 @@ export function usePersistedWorkoutSets(
   const timersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const chainRef = useRef<Record<string, Promise<void>>>({});
   const pendingKeysRef = useRef(new Set<string>());
+  const completingRef = useRef(new Set<string>());
   const readyRef = useRef(isReady);
   const readOnlyRef = useRef(isReadOnly);
 
@@ -70,17 +71,21 @@ export function usePersistedWorkoutSets(
   readOnlyRef.current = isReadOnly;
 
   const hydrate = useCallback((sets: WorkoutSetRecord[]) => {
-    const next = recordsToState(sets);
-    inputsRef.current = next.inputs;
-    completedRef.current = new Set(
-      Object.entries(next.completed)
-        .filter(([, isCompleted]) => isCompleted)
-        .map(([key]) => key),
-    );
-    idsRef.current = next.ids;
-    setInputs(next.inputs);
-    setCompletedSets(next.completed);
-    setSetErrors({});
+    try {
+      const next = recordsToState(sets ?? []);
+      inputsRef.current = next.inputs;
+      completedRef.current = new Set(
+        Object.entries(next.completed)
+          .filter(([, isCompleted]) => isCompleted)
+          .map(([key]) => key),
+      );
+      idsRef.current = next.ids;
+      setInputs(next.inputs);
+      setCompletedSets(next.completed);
+      setSetErrors({});
+    } catch (error) {
+      console.error('[WORKOUT SCREEN ERROR]', error);
+    }
   }, []);
 
   const setFieldError = useCallback((key: string, message: string | null) => {
@@ -223,13 +228,22 @@ export function usePersistedWorkoutSets(
         return { ok: false };
       }
 
+      if (completingRef.current.has(key)) {
+        return { ok: false };
+      }
+
       const values = inputsRef.current[key] ?? emptyInputs();
       const weight = parseOptionalWeight(values.weight);
       const reps = parseOptionalReps(values.reps);
       const rir = parseOptionalRir(values.rir);
 
-      if (!weight.ready || weight.value === null || !reps.ready || reps.value === null) {
-        setFieldError(key, 'Enter weight and reps before completing this set.');
+      if (!weight.ready) {
+        setFieldError(key, 'Enter a valid weight or leave it blank.');
+        return { ok: false };
+      }
+
+      if (!reps.ready || reps.value === null) {
+        setFieldError(key, 'Enter reps before completing this set.');
         return { ok: false };
       }
 
@@ -238,6 +252,7 @@ export function usePersistedWorkoutSets(
         return { ok: false };
       }
 
+      completingRef.current.add(key);
       completedRef.current.add(key);
       setCompletedSets((current) => ({ ...current, [key]: true }));
       setFieldError(key, null);
@@ -251,29 +266,44 @@ export function usePersistedWorkoutSets(
 
       pendingKeysRef.current.delete(key);
 
-      const result = await saveWorkoutSet(sessionId, {
-        setId: idsRef.current[key],
-        exerciseId,
-        setNumber,
-        weight: weight.value,
-        reps: reps.value,
-        rir: rir.value,
-        isCompleted: true,
-      });
+      const previous = chainRef.current[key] ?? Promise.resolve();
+      let completeResult: CompleteResult = { ok: false };
 
-      if (!result.ok) {
-        completedRef.current.delete(key);
-        setCompletedSets((current) => {
-          const next = { ...current };
-          delete next[key];
-          return next;
+      const next = previous
+        .catch(() => undefined)
+        .then(async () => {
+          const result = await saveWorkoutSet(sessionId, {
+            setId: idsRef.current[key],
+            exerciseId,
+            setNumber,
+            weight: weight.value,
+            reps: reps.value,
+            rir: rir.value,
+            isCompleted: true,
+          });
+
+          if (!result.ok) {
+            completedRef.current.delete(key);
+            setCompletedSets((current) => {
+              const nextCompleted = { ...current };
+              delete nextCompleted[key];
+              return nextCompleted;
+            });
+            setFieldError(key, result.error);
+            completeResult = { ok: false };
+            return;
+          }
+
+          idsRef.current[key] = result.data.id;
+          completeResult = { ok: true };
+        })
+        .finally(() => {
+          completingRef.current.delete(key);
         });
-        setFieldError(key, result.error);
-        return { ok: false };
-      }
 
-      idsRef.current[key] = result.data.id;
-      return { ok: true };
+      chainRef.current[key] = next;
+      await next;
+      return completeResult;
     },
     [sessionId, setFieldError],
   );
@@ -285,6 +315,13 @@ export function usePersistedWorkoutSets(
 
     await flushSession(sessionId);
   }, [flushSession, sessionId]);
+
+  const applySets = useCallback(
+    (sets: WorkoutSetRecord[]) => {
+      hydrate(sets ?? []);
+    },
+    [hydrate],
+  );
 
   useLayoutEffect(() => {
     if (!isReady || !sessionId) {
@@ -320,5 +357,6 @@ export function usePersistedWorkoutSets(
     updateInput,
     completeSet,
     flushAll,
+    applySets,
   };
 }

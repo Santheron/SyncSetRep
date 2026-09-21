@@ -1,3 +1,8 @@
+import {
+  calculatePlates,
+  DEFAULT_BAR_WEIGHT_LB,
+} from '@/lib/plate-calculator';
+
 export type EquipmentType =
   | 'barbell'
   | 'dumbbell'
@@ -27,7 +32,7 @@ export type WarmupInput = {
   workingWeight: number | null;
 };
 
-const EMPTY_BAR_LB = 45;
+const EMPTY_BAR_LB = DEFAULT_BAR_WEIGHT_LB;
 const BARBELL_DEFAULT_INCREMENT = 5;
 const DUMBBELL_MAX_LB = 100;
 const DUMBBELL_INCREMENT = 5;
@@ -47,12 +52,18 @@ export function parsePositiveWeight(value: string): number | null {
   return parsed;
 }
 
-export function formatWeight(weight: number): string {
-  if (Number.isInteger(weight)) {
-    return String(weight);
+export function formatWeight(weight: number | string): string {
+  const numeric = typeof weight === 'bigint' ? Number(weight) : Number(weight);
+
+  if (!Number.isFinite(numeric)) {
+    return '0';
   }
 
-  return String(Number(weight.toFixed(2)));
+  if (Number.isInteger(numeric)) {
+    return String(numeric);
+  }
+
+  return String(Number(numeric.toFixed(2)));
 }
 
 export function normalizeEquipmentType(
@@ -78,6 +89,25 @@ export function normalizeEquipmentType(
 }
 
 export function calculateWarmup(input: WarmupInput): WarmupPlan {
+  try {
+    console.log('[Warmup] input', {
+      exerciseName: input.exerciseName,
+      equipmentType: input.equipmentType,
+      warmupEnabled: input.warmupEnabled,
+      minWeight: input.minWeight,
+      minWeightType: typeof input.minWeight,
+      weightIncrement: input.weightIncrement,
+      workingWeight: input.workingWeight,
+    });
+    return calculateWarmupUnsafe(input);
+  } catch (error) {
+    console.error('[START WORKOUT ERROR]', error);
+    console.error('[Warmup] failed', error);
+    return emptyPlan();
+  }
+}
+
+function calculateWarmupUnsafe(input: WarmupInput): WarmupPlan {
   if (!input.warmupEnabled) {
     return emptyPlan();
   }
@@ -181,13 +211,21 @@ function barbellWarmupSets(
   }
 
   const emptyBar = { weight: bar, reps: workingWeight >= 135 ? '10' : '8' };
-  const fifty = snapWarmupWeight(workingWeight * 0.5, workingWeight, increment, bar);
+  const fifty = snapLoadableBarbell(
+    snapWarmupWeight(workingWeight * 0.5, workingWeight, increment, bar),
+    workingWeight,
+    bar,
+  );
 
   if (fifty === null || fifty <= bar) {
-    const ramp = snapWarmupWeight(
-      workingWeight * 0.8,
+    const ramp = snapLoadableBarbell(
+      snapWarmupWeight(
+        workingWeight * 0.8,
+        workingWeight,
+        increment,
+        bar,
+      ),
       workingWeight,
-      increment,
       bar,
     );
 
@@ -202,8 +240,8 @@ function barbellWarmupSets(
     [
       emptyBar,
       { weight: fifty, reps: '5' },
-      maybeSet(workingWeight * 0.7, workingWeight, increment, bar, '3'),
-      maybeSet(workingWeight * 0.85, workingWeight, increment, bar, '1–2'),
+      maybeBarbellSet(workingWeight * 0.7, workingWeight, increment, bar, '3'),
+      maybeBarbellSet(workingWeight * 0.85, workingWeight, increment, bar, '1–2'),
     ].filter((set): set is { weight: number; reps: string } => set !== null),
     increment * 2,
     workingWeight,
@@ -249,6 +287,41 @@ function stackWarmupSets(
     increment,
     workingWeight,
   );
+}
+
+function maybeBarbellSet(
+  rawWeight: number,
+  workingWeight: number,
+  increment: number,
+  barWeight: number,
+  reps: string,
+): { weight: number; reps: string } | null {
+  const snapped = snapWarmupWeight(rawWeight, workingWeight, increment, barWeight);
+  const weight = snapLoadableBarbell(snapped, workingWeight, barWeight);
+
+  if (weight === null) {
+    return null;
+  }
+
+  return { weight, reps };
+}
+
+function snapLoadableBarbell(
+  weight: number | null,
+  workingWeight: number,
+  barWeight: number,
+): number | null {
+  if (weight === null) {
+    return null;
+  }
+
+  const loadable = calculatePlates(weight, barWeight).actualWeight;
+
+  if (loadable >= workingWeight || loadable < barWeight || loadable <= 0) {
+    return null;
+  }
+
+  return cleanNumber(loadable);
 }
 
 function maybeSet(
@@ -364,8 +437,14 @@ function dedupeRamp(
   return result;
 }
 
-function cleanNumber(value: number): number {
-  return Number(value.toFixed(4));
+function cleanNumber(value: number | string): number {
+  const numeric = typeof value === 'bigint' ? Number(value) : Number(value);
+
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+
+  return Number(numeric.toFixed(4));
 }
 
 function barbellEmptyMessage(

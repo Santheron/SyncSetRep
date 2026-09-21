@@ -1,7 +1,13 @@
 import { formatWeight } from '@/lib/warmup';
 
 export function formatWorkoutDate(isoDate: string): string {
-  return new Date(isoDate).toLocaleDateString('en-US', {
+  const date = new Date(isoDate);
+
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  return date.toLocaleDateString('en-US', {
     weekday: 'short',
     month: 'short',
     day: 'numeric',

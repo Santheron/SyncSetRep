@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -11,17 +12,27 @@ import {
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
+import { ExercisePickerSheet } from '@/components/exercise-picker-sheet';
+import { ExerciseProgressionBlock } from '@/components/exercise-progression';
 import { RestTimerCard } from '@/components/rest-timer';
+import { PlateLoadHint } from '@/components/plate-load';
 import { WarmupModal } from '@/components/warmup-modal';
 import { Colors } from '@/constants/theme';
 import { usePersistedWorkoutSets } from '@/hooks/use-persisted-workout-sets';
 import { useRestTimer } from '@/hooks/use-rest-timer';
+import { buildWorkoutProgressions } from '@/lib/progression';
 import { parsePositiveWeight } from '@/lib/warmup';
 import {
+  fetchPreviousPerformanceForExercises,
   finishWorkoutSession,
+  listExercisesForPicker,
   loadActiveWorkout,
   setKey,
+  swapWorkoutExercise,
+  type ExercisePreviousPerformance,
+  type ExerciseSwapScope,
   type ProgramExercise,
+  type WorkoutExercise,
   type WorkoutSetRecord,
 } from '@/lib/workout-session';
 
@@ -33,12 +44,18 @@ export default function ActiveWorkoutScreen() {
   const { sessionId: sessionIdParam } = useLocalSearchParams<{
     sessionId: string | string[];
   }>();
-  const sessionId = Array.isArray(sessionIdParam) ? sessionIdParam[0] : sessionIdParam;
+  const rawSessionId = Array.isArray(sessionIdParam) ? sessionIdParam[0] : sessionIdParam;
+  const sessionId =
+    rawSessionId == null || rawSessionId === '' ? undefined : String(rawSessionId);
 
   const [programDayName, setProgramDayName] = useState<string | null>(null);
   const [programDaySubtitle, setProgramDaySubtitle] = useState<string | null>(null);
   const [exercises, setExercises] = useState<ProgramExercise[]>([]);
   const [initialSets, setInitialSets] = useState<WorkoutSetRecord[]>(EMPTY_SETS);
+  const [previousPerformance, setPreviousPerformance] = useState<
+    ExercisePreviousPerformance[]
+  >([]);
+  const [previousError, setPreviousError] = useState<string | null>(null);
   const [isFinished, setIsFinished] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isFinishing, setIsFinishing] = useState(false);
@@ -51,9 +68,43 @@ export default function ActiveWorkoutScreen() {
   const startRestTimer = restTimer.start;
   const isReady = Boolean(sessionId) && loadedSessionId === sessionId && !errorMessage;
   const persisted = usePersistedWorkoutSets(sessionId, initialSets, isFinished, isReady);
-  const { inputs, completedSets, setErrors, updateInput, completeSet, flushAll } = persisted;
+  const { inputs, completedSets, setErrors, updateInput, completeSet, flushAll, applySets } =
+    persisted;
+  const [pickerItem, setPickerItem] = useState<ProgramExercise | null>(null);
+  const [pickerExercises, setPickerExercises] = useState<WorkoutExercise[]>([]);
+  const [pickerLoading, setPickerLoading] = useState(false);
+  const [pickerError, setPickerError] = useState<string | null>(null);
+  const [isSwapping, setIsSwapping] = useState(false);
+  const [swapError, setSwapError] = useState<string | null>(null);
+  const progressions = useMemo(() => {
+    try {
+      const previousByExerciseId = new Map<
+        string,
+        { date: string | null; sets: WorkoutSetRecord[] }
+      >();
+
+      for (const item of Array.isArray(previousPerformance) ? previousPerformance : []) {
+        if (!item?.exerciseId) {
+          continue;
+        }
+
+        previousByExerciseId.set(String(item.exerciseId), {
+          date: item.session?.finishedAt ?? item.session?.startedAt ?? null,
+          sets: Array.isArray(item.sets) ? item.sets : [],
+        });
+      }
+
+      return buildWorkoutProgressions(exercises ?? [], previousByExerciseId);
+    } catch (error) {
+      console.error('[START WORKOUT ERROR]', error);
+      console.error('[WORKOUT SCREEN ERROR]', error);
+      return new Map();
+    }
+  }, [exercises, previousPerformance]);
 
   useEffect(() => {
+    console.log('[WorkoutScreen] mounted', { sessionId });
+
     if (!sessionId) {
       setIsLoading(false);
       setLoadedSessionId(null);
@@ -64,34 +115,99 @@ export default function ActiveWorkoutScreen() {
     const id = sessionId;
     let isMounted = true;
 
+    async function loadPreviousPerformance(items: ProgramExercise[]) {
+      try {
+        console.log('[PreviousPerformance] start');
+        const previousResult = await fetchPreviousPerformanceForExercises(
+          items.flatMap((item) =>
+            item.exercise
+              ? [
+                  {
+                    exerciseId: String(item.exercise.id),
+                    exerciseName: item.exercise.name,
+                  },
+                ]
+              : [],
+          ),
+          id,
+        );
+
+        if (!isMounted) {
+          return;
+        }
+
+        if (!previousResult.ok) {
+          console.error('[PREVIOUS PERFORMANCE ERROR]', previousResult.error);
+          setPreviousPerformance([]);
+          setPreviousError(previousResult.error);
+          return;
+        }
+
+        console.log('[PreviousPerformance] result', {
+          count: previousResult.data.length,
+          exerciseIds: previousResult.data.map((item) => item.exerciseId),
+        });
+        setPreviousPerformance(previousResult.data);
+        setPreviousError(null);
+        console.log('[WorkoutScreen] previous performance loaded');
+      } catch (error) {
+        console.error('[PREVIOUS PERFORMANCE ERROR]', error);
+        if (isMounted) {
+          setPreviousPerformance([]);
+          setPreviousError('Could not load previous performance.');
+        }
+      }
+    }
+
     async function loadWorkout() {
-      setIsLoading(true);
-      const result = await loadActiveWorkout(id);
+      try {
+        setIsLoading(true);
+        const result = await loadActiveWorkout(id);
 
-      if (!isMounted) {
-        return;
-      }
+        if (!isMounted) {
+          return;
+        }
 
-      if (!result.ok) {
-        setErrorMessage(result.error);
-        setProgramDayName(null);
-        setProgramDaySubtitle(null);
-        setExercises([]);
-        setInitialSets(EMPTY_SETS);
-        setIsFinished(false);
-        setLoadedSessionId(null);
+        if (!result.ok) {
+          setErrorMessage(result.error);
+          setProgramDayName(null);
+          setProgramDaySubtitle(null);
+          setExercises([]);
+          setInitialSets(EMPTY_SETS);
+          setPreviousPerformance([]);
+          setPreviousError(null);
+          setIsFinished(false);
+          setLoadedSessionId(null);
+          setIsLoading(false);
+          return;
+        }
+
+        setErrorMessage(null);
+        setProgramDayName(result.data.programDay.name);
+        setProgramDaySubtitle(result.data.programDay.subtitle);
+        setExercises(result.data.exercises);
+        setInitialSets(result.data.sets);
+        setPreviousPerformance([]);
+        setPreviousError(null);
+        setIsFinished(Boolean(result.data.finishedAt));
+        setLoadedSessionId(id);
         setIsLoading(false);
-        return;
-      }
+        console.log('[WorkoutScreen] exercises', result.data.exercises.length);
+        console.log('[WorkoutScreen] persisted sets', result.data.sets.length);
 
-      setErrorMessage(null);
-      setProgramDayName(result.data.programDay.name);
-      setProgramDaySubtitle(result.data.programDay.subtitle);
-      setExercises(result.data.exercises);
-      setInitialSets(result.data.sets);
-      setIsFinished(Boolean(result.data.finishedAt));
-      setLoadedSessionId(id);
-      setIsLoading(false);
+        void loadPreviousPerformance(result.data.exercises);
+      } catch (error) {
+        console.error('[WORKOUT SCREEN ERROR]', error);
+        if (!isMounted) {
+          return;
+        }
+
+        setErrorMessage(
+          error instanceof Error ? error.message : 'Could not load this workout.',
+        );
+        setPreviousPerformance([]);
+        setIsLoading(false);
+      }
     }
 
     void loadWorkout();
@@ -144,6 +260,121 @@ export default function ActiveWorkoutScreen() {
     router.dismissTo('/');
   }
 
+  function hasCompletedSets(exerciseId: string, setCount: number): boolean {
+    for (let setNumber = 1; setNumber <= setCount; setNumber += 1) {
+      if (completedSets[setKey(exerciseId, setNumber)]) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  async function openExercisePicker(item: ProgramExercise) {
+    const exerciseId = item.exercise?.id ? String(item.exercise.id) : null;
+    const programExerciseId = String(item.programExerciseId || item.id);
+
+    if (!exerciseId || programExerciseId.startsWith('session:') || isFinished || isSwapping) {
+      return;
+    }
+
+    const openPicker = async () => {
+      setPickerItem(item);
+      setPickerLoading(true);
+      setPickerError(null);
+      const result = await listExercisesForPicker();
+
+      if (!result.ok) {
+        setPickerExercises([]);
+        setPickerError(result.error);
+        setPickerLoading(false);
+        return;
+      }
+
+      setPickerExercises(result.data.filter((exercise) => exercise.id !== exerciseId));
+      setPickerLoading(false);
+    };
+
+    if (hasCompletedSets(exerciseId, Number(item.targetSets) || 0)) {
+      Alert.alert(
+        'You already logged sets for this exercise.',
+        'Keep completed sets and switch remaining sets?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Keep completed sets and switch remaining sets',
+            onPress: () => {
+              void openPicker();
+            },
+          },
+        ],
+      );
+      return;
+    }
+
+    void openPicker();
+  }
+
+  async function confirmExerciseSwap(exercise: WorkoutExercise, scope: ExerciseSwapScope) {
+    if (!sessionId || !pickerItem?.exercise || isSwapping) {
+      return;
+    }
+
+    const fromExerciseId = String(pickerItem.exercise.id);
+    const programExerciseId = String(pickerItem.programExerciseId || pickerItem.id);
+    const keepCompletedSets = hasCompletedSets(
+      fromExerciseId,
+      Number(pickerItem.targetSets) || 0,
+    );
+
+    setIsSwapping(true);
+    setSwapError(null);
+    await flushAll();
+
+    const result = await swapWorkoutExercise({
+      sessionId,
+      programExerciseId,
+      fromExerciseId,
+      toExerciseId: exercise.id,
+      scope,
+      keepCompletedSets,
+    });
+
+    if (!result.ok) {
+      setSwapError(result.error);
+      setIsSwapping(false);
+      return;
+    }
+
+    setExercises(result.data.exercises);
+    setInitialSets(result.data.sets);
+    applySets(result.data.sets);
+    setPickerItem(null);
+    setIsSwapping(false);
+
+    const previousResult = await fetchPreviousPerformanceForExercises(
+      result.data.exercises.flatMap((item) =>
+        item.exercise
+          ? [
+              {
+                exerciseId: String(item.exercise.id),
+                exerciseName: item.exercise.name,
+              },
+            ]
+          : [],
+      ),
+      sessionId,
+    );
+
+    if (previousResult.ok) {
+      setPreviousPerformance(previousResult.data);
+      setPreviousError(null);
+    } else {
+      setPreviousPerformance([]);
+      setPreviousError(previousResult.error);
+    }
+  }
+
   const warmupItem = exercises.find(
     (item) => (item.exercise?.id ?? item.id) === warmupExerciseId,
   );
@@ -193,9 +424,10 @@ export default function ActiveWorkoutScreen() {
           <Text style={styles.error}>Could not load this workout. {errorMessage}</Text>
         ) : (
           exercises.map((item) => {
-            const exerciseId = item.exercise?.id;
+            const exerciseId = item.exercise?.id ? String(item.exercise.id) : undefined;
             const notes = item.notes?.trim();
-            const setCount = item.targetSets;
+            const setCount = Number(item.targetSets) || 0;
+            const progression = exerciseId ? progressions.get(exerciseId) : undefined;
 
             return (
               <Card key={item.id} style={styles.exerciseCard}>
@@ -203,26 +435,47 @@ export default function ActiveWorkoutScreen() {
                   <Text style={styles.exerciseName}>
                     {item.exercise?.name ?? 'Unknown exercise'}
                   </Text>
-                  {item.exercise?.warmupEnabled ? (
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={`Warm up ${item.exercise.name}`}
-                      onPress={() => setWarmupExerciseId(item.exercise?.id ?? item.id)}
-                      style={({ pressed }) => [
-                        styles.warmupButton,
-                        pressed && styles.pressed,
-                      ]}>
-                      <Text style={styles.warmupButtonLabel}>Warm Up</Text>
-                    </Pressable>
-                  ) : null}
+                  <View style={styles.exerciseActions}>
+                    {item.exercise?.warmupEnabled ? (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Warm up ${item.exercise.name}`}
+                        onPress={() => setWarmupExerciseId(item.exercise?.id ?? item.id)}
+                        style={({ pressed }) => [
+                          styles.warmupButton,
+                          pressed && styles.pressed,
+                        ]}>
+                        <Text style={styles.warmupButtonLabel}>Warm Up</Text>
+                      </Pressable>
+                    ) : null}
+                    {!isFinished &&
+                    !String(item.id).endsWith(':logged') &&
+                    !String(item.programExerciseId || item.id).startsWith('session:') ? (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Exercise menu for ${item.exercise?.name ?? 'exercise'}`}
+                        onPress={() => {
+                          void openExercisePicker(item);
+                        }}
+                        style={({ pressed }) => [
+                          styles.menuButton,
+                          pressed && styles.pressed,
+                        ]}>
+                        <Text style={styles.menuButtonLabel}>···</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
                 </View>
                 {item.exercise?.category ? (
                   <Text style={styles.exerciseMeta}>{item.exercise.category}</Text>
                 ) : null}
                 <Text style={styles.exerciseMeta}>
-                  {setCount} sets · {item.minReps}–{item.maxReps} reps
+                  {item.maxReps > 0
+                    ? `${setCount} sets · ${item.minReps}–${item.maxReps} reps`
+                    : `${setCount} sets`}
                 </Text>
                 {notes ? <Text style={styles.exerciseMeta}>{notes}</Text> : null}
+                {progression ? <ExerciseProgressionBlock progression={progression} /> : null}
 
                 {exerciseId
                   ? Array.from({ length: setCount }, (_, index) => {
@@ -247,7 +500,7 @@ export default function ActiveWorkoutScreen() {
                                 styles.setInput,
                                 inputsDisabled && styles.setInputDisabled,
                               ]}
-                              value={values.weight}
+                              value={String(values.weight ?? '')}
                             />
                             <TextInput
                               accessibilityLabel={`Set ${setNumber} reps`}
@@ -260,7 +513,7 @@ export default function ActiveWorkoutScreen() {
                                 styles.setInput,
                                 inputsDisabled && styles.setInputDisabled,
                               ]}
-                              value={values.reps}
+                              value={String(values.reps ?? '')}
                             />
                             <TextInput
                               accessibilityLabel={`Set ${setNumber} RIR`}
@@ -273,7 +526,7 @@ export default function ActiveWorkoutScreen() {
                                 styles.rirInput,
                                 inputsDisabled && styles.setInputDisabled,
                               ]}
-                              value={values.rir}
+                              value={String(values.rir ?? '')}
                             />
                             <Pressable
                               accessibilityRole="button"
@@ -300,6 +553,11 @@ export default function ActiveWorkoutScreen() {
                               </Text>
                             </Pressable>
                           </View>
+                          <PlateLoadHint
+                            equipmentType={item.exercise?.equipmentType}
+                            exerciseName={item.exercise?.name}
+                            weight={values.weight}
+                          />
                           {setErrors[key] ? (
                             <Text style={styles.setError}>{setErrors[key]}</Text>
                           ) : null}
@@ -328,6 +586,14 @@ export default function ActiveWorkoutScreen() {
           </Text>
         </Pressable>
 
+        {swapError ? (
+          <Text style={styles.error}>Could not swap exercise. {swapError}</Text>
+        ) : null}
+
+        {previousError ? (
+          <Text style={styles.error}>Could not load previous performance. {previousError}</Text>
+        ) : null}
+
         {finishError ? (
           <Text style={styles.error}>Could not finish workout. {finishError}</Text>
         ) : null}
@@ -346,6 +612,21 @@ export default function ActiveWorkoutScreen() {
             : null
         }
         onClose={() => setWarmupExerciseId(null)}
+      />
+      <ExercisePickerSheet
+        visible={pickerItem !== null}
+        currentName={pickerItem?.exercise?.name ?? 'this exercise'}
+        exercises={pickerExercises}
+        isLoading={pickerLoading || isSwapping}
+        errorMessage={pickerError}
+        onClose={() => {
+          if (!isSwapping) {
+            setPickerItem(null);
+          }
+        }}
+        onConfirm={(exercise, scope) => {
+          void confirmExerciseSwap(exercise, scope);
+        }}
       />
     </KeyboardAvoidingView>
   );
@@ -391,6 +672,11 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 12,
   },
+  exerciseActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   exerciseName: {
     color: palette.text,
     fontSize: 20,
@@ -413,6 +699,22 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 0.4,
     textTransform: 'uppercase',
+  },
+  menuButton: {
+    minHeight: 32,
+    minWidth: 32,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: palette.border,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  menuButtonLabel: {
+    color: palette.text,
+    fontSize: 16,
+    fontWeight: '800',
+    letterSpacing: 1,
   },
   exerciseMeta: {
     color: palette.muted,
