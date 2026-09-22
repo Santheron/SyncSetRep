@@ -18,13 +18,10 @@ const palette = Colors.dark;
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-export default function SignUpScreen() {
+export default function ForgotPasswordScreen() {
   const router = useRouter();
-  const { signUp } = useAuth();
-  const [displayName, setDisplayName] = useState('');
+  const { requestPasswordReset } = useAuth();
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -34,23 +31,8 @@ export default function SignUpScreen() {
       return;
     }
 
-    if (!displayName.trim()) {
-      setErrorMessage('Enter a display name.');
-      return;
-    }
-
     if (!EMAIL_PATTERN.test(email.trim())) {
       setErrorMessage('Enter a valid email address.');
-      return;
-    }
-
-    if (password.length < 8) {
-      setErrorMessage('Password must be at least 8 characters.');
-      return;
-    }
-
-    if (password !== confirmPassword) {
-      setErrorMessage('Passwords do not match.');
       return;
     }
 
@@ -58,20 +40,18 @@ export default function SignUpScreen() {
     setErrorMessage(null);
     setInfoMessage(null);
 
-    const result = await signUp(email, password, displayName);
+    const result = await requestPasswordReset(email);
+
+    setIsSubmitting(false);
 
     if (result.error) {
       setErrorMessage(result.error);
-      setIsSubmitting(false);
       return;
     }
 
-    if (result.needsConfirmation) {
-      setInfoMessage(
-        'Check your email to confirm your account. Open the confirmation link on this phone to finish signing in.',
-      );
-      setIsSubmitting(false);
-    }
+    setInfoMessage(
+      'If that email is registered, we sent a reset link. Open it on this phone to set a new password.',
+    );
   }
 
   return (
@@ -80,22 +60,10 @@ export default function SignUpScreen() {
       style={styles.flex}>
       <Screen keyboardShouldPersistTaps="handled">
         <Text style={styles.kicker}>SyncSetRep</Text>
-        <Text style={styles.title}>Sign Up</Text>
-        <Text style={styles.subtitle}>Create an account to keep your workouts private.</Text>
-
-        <View style={styles.field}>
-          <Text style={styles.fieldLabel}>Display name</Text>
-          <TextInput
-            accessibilityLabel="Display name"
-            autoCapitalize="words"
-            autoComplete="name"
-            onChangeText={setDisplayName}
-            placeholder="Your name"
-            placeholderTextColor={palette.muted}
-            style={styles.input}
-            value={displayName}
-          />
-        </View>
+        <Text style={styles.title}>Forgot Password?</Text>
+        <Text style={styles.subtitle}>
+          Enter your account email and we will send a link to choose a new password.
+        </Text>
 
         <View style={styles.field}>
           <Text style={styles.fieldLabel}>Email</Text>
@@ -112,58 +80,28 @@ export default function SignUpScreen() {
           />
         </View>
 
-        <View style={styles.field}>
-          <Text style={styles.fieldLabel}>Password</Text>
-          <TextInput
-            accessibilityLabel="Password"
-            autoCapitalize="none"
-            autoComplete="new-password"
-            onChangeText={setPassword}
-            placeholder="At least 8 characters"
-            placeholderTextColor={palette.muted}
-            secureTextEntry
-            style={styles.input}
-            value={password}
-          />
-        </View>
-
-        <View style={styles.field}>
-          <Text style={styles.fieldLabel}>Confirm password</Text>
-          <TextInput
-            accessibilityLabel="Confirm password"
-            autoCapitalize="none"
-            autoComplete="new-password"
-            onChangeText={setConfirmPassword}
-            placeholder="Repeat password"
-            placeholderTextColor={palette.muted}
-            secureTextEntry
-            style={styles.input}
-            value={confirmPassword}
-          />
-        </View>
-
         {errorMessage ? <Text style={styles.error}>{errorMessage}</Text> : null}
         {infoMessage ? <Text style={styles.info}>{infoMessage}</Text> : null}
 
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Sign Up"
+          accessibilityLabel="Send reset link"
           disabled={isSubmitting}
           onPress={() => {
             void submit();
           }}
           style={({ pressed }) => [styles.primaryButton, (pressed || isSubmitting) && styles.pressed]}>
           <Text style={styles.primaryButtonLabel}>
-            {isSubmitting ? 'Creating account...' : 'Sign Up'}
+            {isSubmitting ? 'Sending...' : 'Send Reset Link'}
           </Text>
         </Pressable>
 
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Sign in instead"
+          accessibilityLabel="Back to Sign In"
           onPress={() => router.replace('/sign-in')}
           style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
-          <Text style={styles.secondaryButtonLabel}>Already have an account? Sign In</Text>
+          <Text style={styles.secondaryButtonLabel}>Back to Sign In</Text>
         </Pressable>
       </Screen>
     </KeyboardAvoidingView>
@@ -247,9 +185,8 @@ const styles = StyleSheet.create({
   },
   secondaryButtonLabel: {
     color: palette.accent,
-    fontSize: 16,
+    fontSize: 20,
     fontWeight: '800',
-    textAlign: 'center',
   },
   pressed: {
     opacity: 0.85,

@@ -4,6 +4,7 @@ import { Stack, useLocalSearchParams } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
+import { ensureOwnProgram } from '@/lib/programs';
 import { supabase } from '@/lib/supabase';
 
 const palette = Colors.dark;
@@ -68,11 +69,26 @@ export default function ProgramDayScreen() {
     let isMounted = true;
 
     async function loadProgramDay() {
+      const programResult = await ensureOwnProgram();
+
+      if (!isMounted) {
+        return;
+      }
+
+      if (!programResult.ok) {
+        setErrorMessage(programResult.error);
+        setProgramDay(null);
+        setExercises([]);
+        setIsLoading(false);
+        return;
+      }
+
       const [dayResult, exercisesResult] = await Promise.all([
         supabase
           .from('program_days')
           .select('id, name, subtitle')
           .eq('id', programDayId)
+          .eq('program_id', programResult.data)
           .single(),
         supabase
           .from('program_exercises')

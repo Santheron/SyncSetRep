@@ -1,3 +1,4 @@
+import { getAuthenticatedUserId } from '@/lib/current-user';
 import { supabase } from '@/lib/supabase';
 
 type Result<T> = { ok: true; data: T } | { ok: false; error: string };
@@ -46,9 +47,16 @@ export function formatMetricNumber(value: number | null): string {
 }
 
 export async function listBodyMetrics(): Promise<Result<BodyMetric[]>> {
+  const userResult = await getAuthenticatedUserId();
+
+  if (!userResult.ok) {
+    return userResult;
+  }
+
   const { data, error } = await supabase
     .from('body_metrics')
     .select('id, recorded_at, bodyweight, waist, body_fat, notes')
+    .eq('user_id', userResult.data)
     .order('recorded_at', { ascending: false });
 
   if (error) {
@@ -59,7 +67,14 @@ export async function listBodyMetrics(): Promise<Result<BodyMetric[]>> {
 }
 
 export async function insertBodyMetric(input: BodyMetricInput): Promise<Result<true>> {
+  const userResult = await getAuthenticatedUserId();
+
+  if (!userResult.ok) {
+    return userResult;
+  }
+
   const { error } = await supabase.from('body_metrics').insert({
+    user_id: userResult.data,
     recorded_at: input.recorded_at ?? new Date().toISOString(),
     bodyweight: input.bodyweight,
     waist: input.waist,

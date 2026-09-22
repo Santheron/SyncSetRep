@@ -1,3 +1,4 @@
+import { getAuthenticatedUserId } from '@/lib/current-user';
 import { supabase } from '@/lib/supabase';
 
 export const CARDIO_ACTIVITY_TYPES = [
@@ -194,13 +195,14 @@ function logCardioSaveError(error: {
   });
 }
 
-function buildInsertRows(input: CardioSessionInput): Record<string, unknown>[] {
+function buildInsertRows(input: CardioSessionInput, userId: string): Record<string, unknown>[] {
   const shared = {
     activity_type: input.activity_type,
     started_at: input.started_at,
     duration_minutes: input.duration_minutes,
     calories: input.calories,
     notes: input.notes,
+    user_id: userId,
   };
 
   return [
@@ -227,9 +229,16 @@ function buildInsertRows(input: CardioSessionInput): Record<string, unknown>[] {
 }
 
 export async function listCardioSessions(): Promise<Result<CardioSession[]>> {
+  const userResult = await getAuthenticatedUserId();
+
+  if (!userResult.ok) {
+    return userResult;
+  }
+
   const { data, error } = await supabase
     .from('cardio_sessions')
     .select('*')
+    .eq('user_id', userResult.data)
     .order('started_at', { ascending: false });
 
   if (error) {
@@ -245,6 +254,12 @@ export async function listCardioSessions(): Promise<Result<CardioSession[]>> {
 export async function insertCardioSession(
   input: CardioSessionInput,
 ): Promise<Result<{ id: string }>> {
+  const userResult = await getAuthenticatedUserId();
+
+  if (!userResult.ok) {
+    return userResult;
+  }
+
   const sanitized: CardioSessionInput = {
     activity_type: input.activity_type,
     started_at: input.started_at,
@@ -265,7 +280,7 @@ export async function insertCardioSession(
     hint?: string | null;
   } | null = null;
 
-  for (const row of buildInsertRows(sanitized)) {
+  for (const row of buildInsertRows(sanitized, userResult.data)) {
     const { data, error } = await supabase
       .from('cardio_sessions')
       .insert(row)

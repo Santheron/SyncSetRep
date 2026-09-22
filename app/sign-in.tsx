@@ -8,7 +8,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
@@ -16,21 +16,26 @@ import { useAuth } from '@/lib/auth-context';
 
 const palette = Colors.dark;
 
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export default function SignInScreen() {
   const router = useRouter();
+  const { passwordUpdated } = useLocalSearchParams<{ passwordUpdated?: string | string[] }>();
   const { signIn } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const showPasswordUpdated =
+    (Array.isArray(passwordUpdated) ? passwordUpdated[0] : passwordUpdated) === '1';
 
   async function submit() {
     if (isSubmitting) {
       return;
     }
 
-    if (!email.trim() || !password) {
-      setErrorMessage('Enter your email and password.');
+    if (!EMAIL_PATTERN.test(email.trim()) || !password) {
+      setErrorMessage('Enter a valid email and password.');
       return;
     }
 
@@ -50,7 +55,7 @@ export default function SignInScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       style={styles.flex}>
       <Screen keyboardShouldPersistTaps="handled">
-        <Text style={styles.kicker}>Workout Tracker</Text>
+        <Text style={styles.kicker}>SyncSetRep</Text>
         <Text style={styles.title}>Sign In</Text>
         <Text style={styles.subtitle}>Use your email and password to open your workouts.</Text>
 
@@ -85,6 +90,17 @@ export default function SignInScreen() {
         </View>
 
         {errorMessage ? <Text style={styles.error}>{errorMessage}</Text> : null}
+        {showPasswordUpdated ? (
+          <Text style={styles.info}>Password updated. Sign in with your new password.</Text>
+        ) : null}
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Forgot Password?"
+          onPress={() => router.push('/forgot-password')}
+          style={({ pressed }) => [styles.forgotButton, pressed && styles.pressed]}>
+          <Text style={styles.forgotLabel}>Forgot Password?</Text>
+        </Pressable>
 
         <Pressable
           accessibilityRole="button"
@@ -154,6 +170,21 @@ const styles = StyleSheet.create({
   error: {
     color: palette.text,
     fontSize: 16,
+  },
+  info: {
+    color: palette.accent,
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  forgotButton: {
+    alignSelf: 'flex-start',
+    minHeight: 44,
+    justifyContent: 'center',
+  },
+  forgotLabel: {
+    color: palette.accent,
+    fontSize: 16,
+    fontWeight: '700',
   },
   primaryButton: {
     backgroundColor: palette.accent,

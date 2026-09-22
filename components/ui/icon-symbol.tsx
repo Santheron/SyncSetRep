@@ -23,6 +23,7 @@ const MAPPING = {
   'chart.bar.fill': 'bar-chart',
   'clock.fill': 'history',
   calendar: 'event-note',
+  'person.fill': 'person',
 } as IconMapping;
 
 /**

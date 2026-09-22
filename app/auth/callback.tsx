@@ -7,12 +7,20 @@ import * as WebBrowser from 'expo-web-browser';
 import { AuthLoadingScreen } from '@/components/auth-loading';
 import { Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
+import { useAuth } from '@/lib/auth-context';
 import { isAuthCallbackUrl } from '@/lib/auth-redirect';
-import { createSessionFromUrl } from '@/lib/auth-session-from-url';
+import {
+  createSessionFromUrl,
+  parseAuthCallbackParams,
+} from '@/lib/auth-session-from-url';
+import { hasPasswordResetPending, isRecoveryAuthUrl } from '@/lib/password-recovery';
+import { supabase } from '@/lib/supabase';
 
 WebBrowser.maybeCompleteAuthSession();
 
 const palette = Colors.dark;
+
+const handledCallbackKeys = new Set<string>();
 
 function paramsToUrl(params: Record<string, string | string[]>): string | null {
   const query = new URLSearchParams();
@@ -31,39 +39,109 @@ function paramsToUrl(params: Record<string, string | string[]>): string | null {
     return null;
   }
 
-  return `workouttracker://auth/callback?${queryString}`;
+  return `${Linking.createURL('auth/callback')}?${queryString}`;
+}
+
+function callbackIdentity(url: string): string {
+  const params = parseAuthCallbackParams(url);
+  return params.code || params.token_hash || params.access_token || url;
+}
+
+function pickCallbackUrl(
+  linkingUrl: string | null,
+  routeParams: Record<string, string | string[]>,
+  initialUrl: string | null,
+): string | null {
+  const candidates = [
+    linkingUrl,
+    paramsToUrl(routeParams),
+    initialUrl,
+  ].filter((value): value is string => Boolean(value && isAuthCallbackUrl(value)));
+
+  return (
+    candidates.find((url) => {
+      const params = parseAuthCallbackParams(url);
+      return Boolean(params.code || params.token_hash || (params.access_token && params.refresh_token));
+    }) ??
+    candidates[0] ??
+    null
+  );
 }
 
 export default function AuthCallbackScreen() {
   const router = useRouter();
+  const { beginPasswordRecovery } = useAuth();
   const routeParams = useLocalSearchParams<Record<string, string | string[]>>();
   const routeParamKey = JSON.stringify(routeParams);
   const linkingUrl = Linking.useLinkingURL();
-  const processedUrl = useRef<string | null>(null);
+  const beginPasswordRecoveryRef = useRef(beginPasswordRecovery);
+  const routerRef = useRef(router);
+  const didLogMount = useRef(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isHandling, setIsHandling] = useState(true);
+
+  beginPasswordRecoveryRef.current = beginPasswordRecovery;
+  routerRef.current = router;
+
+  if (!didLogMount.current) {
+    didLogMount.current = true;
+    console.log('[AuthPKCE] callback component mounted');
+    console.log('[AuthPKCE] router params present:', Object.keys(routeParams).length > 0);
+    console.log('[AuthPKCE] linking URL present:', Boolean(linkingUrl));
+  }
+
+  const candidateHint = linkingUrl ?? paramsToUrl(routeParams);
+  const callbackType = candidateHint ? parseAuthCallbackParams(candidateHint).type : undefined;
+  const isRecoveryCallback = callbackType === 'recovery';
 
   useEffect(() => {
     let isMounted = true;
 
+    console.log('[AuthPKCE] callback effect running');
+    console.log('[AuthPKCE] router params present:', Object.keys(JSON.parse(routeParamKey)).length > 0);
+    console.log('[AuthPKCE] linking URL present:', Boolean(linkingUrl));
+
     async function handleIncomingUrl() {
       const params = JSON.parse(routeParamKey) as Record<string, string | string[]>;
-      const candidate =
-        (isAuthCallbackUrl(linkingUrl) ? linkingUrl : null) ??
-        paramsToUrl(params) ??
-        (await Linking.getInitialURL());
+      const candidate = pickCallbackUrl(
+        linkingUrl,
+        params,
+        await Linking.getInitialURL(),
+      );
 
-      if (!candidate || !isAuthCallbackUrl(candidate)) {
+      if (!candidate) {
+        console.log('[AuthPKCE] callback received: false (no candidate URL)');
         return;
       }
 
-      if (processedUrl.current === candidate) {
+      const identity = callbackIdentity(candidate);
+
+      if (handledCallbackKeys.has(identity)) {
+        console.log('[AuthPKCE] callback already handled; skipping duplicate');
+        const pendingReset = await hasPasswordResetPending();
+        const { data } = await supabase.auth.getSession();
+
+        if (!isMounted) {
+          return;
+        }
+
+        if (data.session && (pendingReset || isRecoveryAuthUrl(candidate))) {
+          await beginPasswordRecoveryRef.current();
+          routerRef.current.replace('/reset-password');
+          return;
+        }
+
+        if (data.session) {
+          routerRef.current.replace('/');
+        }
+
         return;
       }
 
-      processedUrl.current = candidate;
+      handledCallbackKeys.add(identity);
       setIsHandling(true);
       setErrorMessage(null);
+      console.log('[AuthPKCE] callback received');
 
       const result = await createSessionFromUrl(candidate);
 
@@ -72,16 +150,26 @@ export default function AuthCallbackScreen() {
       }
 
       if (!result.ok) {
+        handledCallbackKeys.delete(identity);
         setErrorMessage(result.error);
         setIsHandling(false);
         return;
       }
 
-      router.replace('/');
+      const pendingReset = await hasPasswordResetPending();
+      const isRecovery = result.isRecovery || pendingReset || isRecoveryAuthUrl(candidate);
+
+      if (isRecovery) {
+        await beginPasswordRecoveryRef.current();
+        routerRef.current.replace('/reset-password');
+        return;
+      }
+
+      routerRef.current.replace('/');
     }
 
     const timeoutId = setTimeout(() => {
-      if (isMounted && !processedUrl.current) {
+      if (isMounted && handledCallbackKeys.size === 0) {
         setErrorMessage('This confirmation link is missing auth details.');
         setIsHandling(false);
       }
@@ -93,7 +181,7 @@ export default function AuthCallbackScreen() {
       isMounted = false;
       clearTimeout(timeoutId);
     };
-  }, [linkingUrl, routeParamKey, router]);
+  }, [linkingUrl, routeParamKey]);
 
   if (isHandling && !errorMessage) {
     return <AuthLoadingScreen />;
@@ -101,8 +189,8 @@ export default function AuthCallbackScreen() {
 
   return (
     <Screen>
-      <Text style={styles.kicker}>Workout Tracker</Text>
-      <Text style={styles.title}>Email confirmation</Text>
+      <Text style={styles.kicker}>SyncSetRep</Text>
+      <Text style={styles.title}>{isRecoveryCallback ? 'Password recovery' : 'Email link'}</Text>
       <Text style={styles.error}>
         {errorMessage ?? 'Could not finish signing in from this link.'}
       </Text>

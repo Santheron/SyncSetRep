@@ -1,5 +1,6 @@
 import type { User } from '@supabase/supabase-js'
 
+import { ensureOwnProgram } from '@/lib/programs'
 import { supabase } from '@/lib/supabase'
 
 export type Profile = {
@@ -39,12 +40,14 @@ export async function ensureProfile(user: User): Promise<void> {
       display_name: displayName,
       preferred_weight_unit: 'lb',
     })
-    return
+  } else if (!data.display_name && displayName) {
+    await supabase
+      .from('profiles')
+      .update({ display_name: displayName, updated_at: new Date().toISOString() })
+      .eq('id', user.id)
   }
 
-  if (!data.display_name && displayName) {
-    await supabase.from('profiles').update({ display_name: displayName }).eq('id', user.id)
-  }
+  await ensureOwnProgram()
 }
 
 export async function getOwnProfile(): Promise<Profile | null> {

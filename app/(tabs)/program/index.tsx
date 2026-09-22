@@ -4,19 +4,12 @@ import { Link } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
-import { supabase } from '@/lib/supabase';
+import { listProgramDays, type ProgramDayOption } from '@/lib/workout-session';
 
 const palette = Colors.dark;
 
-type ProgramDay = {
-  id: string;
-  day_order: number;
-  name: string;
-  subtitle: string;
-};
-
 export default function ProgramScreen() {
-  const [programDays, setProgramDays] = useState<ProgramDay[]>([]);
+  const [programDays, setProgramDays] = useState<ProgramDayOption[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -24,31 +17,18 @@ export default function ProgramScreen() {
     let isMounted = true;
 
     async function loadProgramDays() {
-      const { data, error } = await supabase
-        .from('program_days')
-        .select('id, day_order, name, subtitle')
-        .order('day_order', { ascending: true });
+      const result = await listProgramDays();
 
       if (!isMounted) {
         return;
       }
 
-      if (error) {
-        console.error('[ProgramDays] query error', {
-          code: error.code,
-          message: error.message,
-          details: error.details,
-          hint: error.hint,
-        });
-        setErrorMessage(
-          [error.code, error.message, error.details, error.hint]
-            .filter(Boolean)
-            .join(' | '),
-        );
+      if (!result.ok) {
+        setErrorMessage(result.error);
         setProgramDays([]);
       } else {
         setErrorMessage(null);
-        setProgramDays(data ?? []);
+        setProgramDays(result.data);
       }
 
       setIsLoading(false);
@@ -93,7 +73,7 @@ export default function ProgramScreen() {
               style={({ pressed }) => pressed && styles.dayPressed}>
               <Card style={styles.dayCard}>
                 <View style={styles.dayIndex}>
-                  <Text style={styles.dayIndexLabel}>{day.day_order}</Text>
+                  <Text style={styles.dayIndexLabel}>{day.dayOrder}</Text>
                 </View>
                 <View style={styles.dayCopy}>
                   <Text style={styles.dayName}>{day.name}</Text>

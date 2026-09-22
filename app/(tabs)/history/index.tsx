@@ -4,6 +4,7 @@ import { Link, useFocusEffect } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
+import { getAuthenticatedUserId } from '@/lib/current-user';
 import { supabase } from '@/lib/supabase';
 import {
   formatWorkoutDate,
@@ -65,6 +66,19 @@ export default function HistoryScreen() {
       let isMounted = true;
 
       async function loadHistory() {
+        const userResult = await getAuthenticatedUserId();
+
+        if (!isMounted) {
+          return;
+        }
+
+        if (!userResult.ok) {
+          setErrorMessage(userResult.error);
+          setWorkouts([]);
+          setIsLoading(false);
+          return;
+        }
+
         const { data, error } = await supabase
           .from('workout_sessions')
           .select(
@@ -82,6 +96,7 @@ export default function HistoryScreen() {
             )
           `,
           )
+          .eq('user_id', userResult.data)
           .not('finished_at', 'is', null)
           .order('started_at', { ascending: false });
 

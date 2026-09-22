@@ -1,4 +1,6 @@
+import { getAuthenticatedUserId } from '@/lib/current-user';
 import { getExerciseProgression } from '@/lib/progression';
+import { assertOwnProgramDay, ensureOwnProgram } from '@/lib/programs';
 import { supabase } from '@/lib/supabase';
 import { unwrapRelation } from '@/lib/workout-format';
 
@@ -555,10 +557,17 @@ const SESSION_SELECT_BASE = `
 `;
 
 async function fetchWorkoutSession(sessionId: string): Promise<Result<SessionRow>> {
+  const userResult = await getAuthenticatedUserId();
+
+  if (!userResult.ok) {
+    return userResult;
+  }
+
   const withOverrides = await supabase
     .from('workout_sessions')
     .select(SESSION_SELECT_WITH_OVERRIDES)
     .eq('id', sessionId)
+    .eq('user_id', userResult.data)
     .maybeSingle();
 
   if (
@@ -569,6 +578,7 @@ async function fetchWorkoutSession(sessionId: string): Promise<Result<SessionRow
       .from('workout_sessions')
       .select(SESSION_SELECT_BASE)
       .eq('id', sessionId)
+      .eq('user_id', userResult.data)
       .maybeSingle();
 
     if (fallback.error || !fallback.data) {
@@ -705,13 +715,21 @@ async function fetchPreviousPerformanceByExercises(
     return { ok: true, data: [] };
   }
 
+  const userResult = await getAuthenticatedUserId();
+
+  if (!userResult.ok) {
+    return userResult;
+  }
+
   let setsQuery = supabase
     .from('workout_sets')
     .select(
-      'id, exercise_id, set_number, weight, reps, rir, is_completed, workout_session_id',
+      'id, exercise_id, set_number, weight, reps, rir, is_completed, workout_session_id, workout_sessions!inner(user_id, finished_at)',
     )
     .in('exercise_id', exerciseIds)
-    .eq('is_completed', true);
+    .eq('is_completed', true)
+    .eq('workout_sessions.user_id', userResult.data)
+    .not('workout_sessions.finished_at', 'is', null);
 
   if (excludeSessionId) {
     setsQuery = setsQuery.neq('workout_session_id', excludeSessionId);
@@ -745,6 +763,7 @@ async function fetchPreviousPerformanceByExercises(
     const { data: sessions, error: sessionsError } = await supabase
       .from('workout_sessions')
       .select('id, started_at, finished_at')
+      .eq('user_id', userResult.data)
       .in('id', sessionIds)
       .not('finished_at', 'is', null);
 
@@ -908,6 +927,12 @@ async function deleteSessionsAndSets(sessionIds: string[]): Promise<Result<true>
     return { ok: true, data: true };
   }
 
+  const userResult = await getAuthenticatedUserId();
+
+  if (!userResult.ok) {
+    return userResult;
+  }
+
   const { error: setsError } = await supabase
     .from('workout_sets')
     .delete()
@@ -921,6 +946,7 @@ async function deleteSessionsAndSets(sessionIds: string[]): Promise<Result<true>
     .from('workout_sessions')
     .delete()
     .in('id', sessionIds)
+    .eq('user_id', userResult.data)
     .is('finished_at', null);
 
   if (sessionsError) {
@@ -931,6 +957,12 @@ async function deleteSessionsAndSets(sessionIds: string[]): Promise<Result<true>
 }
 
 export async function listProgramDays(): Promise<Result<ProgramDayOption[]>> {
+  const programResult = await ensureOwnProgram();
+
+  if (!programResult.ok) {
+    return programResult;
+  }
+
   const { data, error } = await supabase
     .from('program_days')
     .select(
@@ -944,6 +976,7 @@ export async function listProgramDays(): Promise<Result<ProgramDayOption[]>> {
       )
     `,
     )
+    .eq('program_id', programResult.data)
     .order('day_order', { ascending: true });
 
   if (error) {
@@ -968,6 +1001,12 @@ export async function listProgramDays(): Promise<Result<ProgramDayOption[]>> {
 }
 
 export async function listUnfinishedSessions(): Promise<Result<UnfinishedSession[]>> {
+  const userResult = await getAuthenticatedUserId();
+
+  if (!userResult.ok) {
+    return userResult;
+  }
+
   const { data, error } = await supabase
     .from('workout_sessions')
     .select(
@@ -983,6 +1022,7 @@ export async function listUnfinishedSessions(): Promise<Result<UnfinishedSession
       )
     `,
     )
+    .eq('user_id', userResult.data)
     .is('finished_at', null)
     .order('started_at', { ascending: false });
 
@@ -1043,10 +1083,22 @@ export async function startWorkoutForDay(programDayId: string): Promise<Result<{
       return { ok: true, data: { sessionId: String(existing.id) } };
     }
 
+    const ownedDay = await assertOwnProgramDay(programDayId);
+
+    if (!ownedDay.ok) {
+      return ownedDay;
+    }
+
     const exercisesResult = await fetchProgramExercises(programDayId);
 
     if (!exercisesResult.ok) {
       return { ok: false, error: exercisesResult.error };
+    }
+
+    const userResult = await getAuthenticatedUserId();
+
+    if (!userResult.ok) {
+      return userResult;
     }
 
     const { data: session, error: sessionError } = await supabase
@@ -1054,6 +1106,7 @@ export async function startWorkoutForDay(programDayId: string): Promise<Result<{
       .insert({
         program_day_id: programDayId,
         started_at: new Date().toISOString(),
+        user_id: userResult.data,
       })
       .select('id')
       .maybeSingle();
@@ -1238,10 +1291,17 @@ async function saveSessionExerciseOverrides(
   sessionId: string,
   overrides: ExerciseOverrides,
 ): Promise<Result<true>> {
+  const userResult = await getAuthenticatedUserId();
+
+  if (!userResult.ok) {
+    return userResult;
+  }
+
   const { error } = await supabase
     .from('workout_sessions')
     .update({ exercise_overrides: overrides })
     .eq('id', sessionId)
+    .eq('user_id', userResult.data)
     .select('id')
     .maybeSingle();
 
@@ -1258,6 +1318,7 @@ async function saveSessionExerciseOverrides(
     .from('workout_sessions')
     .select('id, notes')
     .eq('id', sessionId)
+    .eq('user_id', userResult.data)
     .maybeSingle();
 
   if (readError) {
@@ -1273,7 +1334,8 @@ async function saveSessionExerciseOverrides(
   const { error: notesError } = await supabase
     .from('workout_sessions')
     .update({ notes: payload })
-    .eq('id', sessionId);
+    .eq('id', sessionId)
+    .eq('user_id', userResult.data);
 
   if (notesError) {
     return { ok: false, error: notesError.message };
@@ -1452,6 +1514,37 @@ export async function swapWorkoutExercise(input: {
       return {
         ok: false,
         error: 'This exercise is not a program template row, so it cannot be replaced in the program.',
+      };
+    }
+
+    const programResult = await ensureOwnProgram();
+
+    if (!programResult.ok) {
+      return {
+        ok: false,
+        error: `Swapped for this workout, but the program was not updated. ${programResult.error}`,
+      };
+    }
+
+    const ownedRow = await supabase
+      .from('program_exercises')
+      .select('id, program_days!inner(program_id)')
+      .eq('id', programExerciseId)
+      .eq('program_days.program_id', programResult.data)
+      .maybeSingle();
+
+    if (ownedRow.error) {
+      return {
+        ok: false,
+        error: `Swapped for this workout, but the program was not updated. ${formatSupabaseError(ownedRow.error)}`,
+      };
+    }
+
+    if (!ownedRow.data) {
+      return {
+        ok: false,
+        error:
+          'Swapped for this workout, but that program row is not in your program so it was not updated.',
       };
     }
 
@@ -1690,6 +1783,11 @@ export async function saveWorkoutSet(
 
 export async function finishWorkoutSession(sessionId: string): Promise<Result<true>> {
   const finishedAt = new Date().toISOString();
+  const userResult = await getAuthenticatedUserId();
+
+  if (!userResult.ok) {
+    return userResult;
+  }
 
   console.log('[finishWorkout] start', {
     session_id: sessionId,
@@ -1700,6 +1798,7 @@ export async function finishWorkoutSession(sessionId: string): Promise<Result<tr
     .from('workout_sessions')
     .update({ finished_at: finishedAt })
     .eq('id', sessionId)
+    .eq('user_id', userResult.data)
     .is('finished_at', null)
     .select('id, finished_at')
     .maybeSingle();
@@ -1738,6 +1837,12 @@ export type PersonalRecord = {
 };
 
 export async function listPersonalRecords(): Promise<Result<PersonalRecord[]>> {
+  const userResult = await getAuthenticatedUserId();
+
+  if (!userResult.ok) {
+    return userResult;
+  }
+
   const { data, error } = await supabase
     .from('workout_sets')
     .select(
@@ -1746,10 +1851,16 @@ export async function listPersonalRecords(): Promise<Result<PersonalRecord[]>> {
       reps,
       exercise:exercises (
         name
+      ),
+      workout_sessions!inner (
+        user_id,
+        finished_at
       )
     `,
     )
-    .eq('is_completed', true);
+    .eq('is_completed', true)
+    .eq('workout_sessions.user_id', userResult.data)
+    .not('workout_sessions.finished_at', 'is', null);
 
   if (error) {
     return { ok: false, error: error.message };

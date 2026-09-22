@@ -4,6 +4,7 @@ import { Stack, useLocalSearchParams } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
+import { getAuthenticatedUserId } from '@/lib/current-user';
 import { supabase } from '@/lib/supabase';
 import {
   formatSetLoad,
@@ -136,6 +137,18 @@ export default function HistoryDetailScreen() {
     let isMounted = true;
 
     async function loadDetail() {
+      const userResult = await getAuthenticatedUserId();
+
+      if (!isMounted) {
+        return;
+      }
+
+      if (!userResult.ok) {
+        setErrorMessage(userResult.error);
+        setIsLoading(false);
+        return;
+      }
+
       const { data: session, error: sessionError } = await supabase
         .from('workout_sessions')
         .select(
@@ -150,6 +163,7 @@ export default function HistoryDetailScreen() {
         `,
         )
         .eq('id', sessionId)
+        .eq('user_id', userResult.data)
         .maybeSingle();
 
       if (!isMounted) {
