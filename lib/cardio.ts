@@ -1,4 +1,5 @@
 import { getAuthenticatedUserId } from '@/lib/current-user';
+import { logOwnedDataError } from '@/lib/rls-error';
 import { supabase } from '@/lib/supabase';
 
 export const CARDIO_ACTIVITY_TYPES = [
@@ -181,17 +182,20 @@ function isUndefinedColumnError(error: { code?: string | null; message?: string 
   return error.code === 'PGRST204' || error.code === '42703';
 }
 
-function logCardioSaveError(error: {
-  code?: string | null;
-  message?: string | null;
-  details?: string | null;
-  hint?: string | null;
-}) {
-  console.log('[CardioSave] error', {
-    code: error.code ?? null,
-    message: error.message ?? null,
-    details: error.details ?? null,
-    hint: error.hint ?? null,
+function logCardioSaveError(
+  error: {
+    code?: string | null;
+    message?: string | null;
+    details?: string | null;
+    hint?: string | null;
+  },
+  userId: string,
+) {
+  logOwnedDataError({
+    table: 'cardio_sessions',
+    operation: 'insert',
+    userId,
+    error,
   });
 }
 
@@ -294,7 +298,7 @@ export async function insertCardioSession(
     }
 
     lastError = error;
-    logCardioSaveError(error);
+    logCardioSaveError(error, userResult.data);
 
     if (!isUndefinedColumnError(error)) {
       break;

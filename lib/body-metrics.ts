@@ -1,4 +1,5 @@
 import { getAuthenticatedUserId } from '@/lib/current-user';
+import { logOwnedDataError } from '@/lib/rls-error';
 import { supabase } from '@/lib/supabase';
 
 type Result<T> = { ok: true; data: T } | { ok: false; error: string };
@@ -83,9 +84,11 @@ export async function insertBodyMetric(input: BodyMetricInput): Promise<Result<t
   });
 
   if (error) {
-    console.log('[insertBodyMetric] error', {
-      error_code: error.code,
-      error_message: error.message,
+    logOwnedDataError({
+      table: 'body_metrics',
+      operation: 'insert',
+      userId: userResult.data,
+      error,
     });
     return { ok: false, error: error.message };
   }

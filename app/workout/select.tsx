@@ -4,6 +4,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
+import { useAuth } from '@/lib/auth-context';
 import { listProgramDays, startWorkoutForDay, type ProgramDayOption } from '@/lib/workout-session';
 
 const palette = Colors.dark;
@@ -18,6 +19,7 @@ function exerciseCountLabel(count: number) {
 
 export default function SelectWorkoutDayScreen() {
   const router = useRouter();
+  const { user, isLoading: isAuthLoading } = useAuth();
   const [days, setDays] = useState<ProgramDayOption[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -56,6 +58,16 @@ export default function SelectWorkoutDayScreen() {
 
   async function selectDay(day: ProgramDayOption) {
     if (startingDayId) {
+      return;
+    }
+
+    if (isAuthLoading) {
+      setErrorMessage('Finishing sign-in. Try Start Workout again in a moment.');
+      return;
+    }
+
+    if (!user) {
+      setErrorMessage('You must be signed in to start a workout.');
       return;
     }
 

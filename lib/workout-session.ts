@@ -1,6 +1,7 @@
 import { getAuthenticatedUserId } from '@/lib/current-user';
 import { getExerciseProgression } from '@/lib/progression';
 import { assertOwnProgramDay, ensureOwnProgram } from '@/lib/programs';
+import { logOwnedDataError } from '@/lib/rls-error';
 import { supabase } from '@/lib/supabase';
 import { unwrapRelation } from '@/lib/workout-format';
 
@@ -1067,7 +1068,6 @@ export async function discardUnfinishedSessions(): Promise<Result<true>> {
 
 export async function startWorkoutForDay(programDayId: string): Promise<Result<{ sessionId: string }>> {
   try {
-    console.log('[StartWorkout] pressed', { programDayId });
     const unfinishedResult = await listUnfinishedSessions();
 
     if (!unfinishedResult.ok) {
@@ -1076,16 +1076,14 @@ export async function startWorkoutForDay(programDayId: string): Promise<Result<{
 
     if (unfinishedResult.data.length > 0) {
       const existing = unfinishedResult.data[0];
-      console.log('[startWorkout] reusing unfinished session', {
-        session_id: existing.id,
-        program_day_id: existing.programDayId,
-      });
+      console.log('[WorkoutStart] reusing unfinished session');
       return { ok: true, data: { sessionId: String(existing.id) } };
     }
 
     const ownedDay = await assertOwnProgramDay(programDayId);
 
     if (!ownedDay.ok) {
+      console.log('[WorkoutStart] program day not owned by current user');
       return ownedDay;
     }
 
@@ -1097,30 +1095,41 @@ export async function startWorkoutForDay(programDayId: string): Promise<Result<{
 
     const userResult = await getAuthenticatedUserId();
 
+    console.log('[WorkoutStart] authenticated user present:', userResult.ok);
+    console.log('[WorkoutStart] session user_id present:', userResult.ok);
+    console.log('[WorkoutStart] program id:', ownedDay.data.programId);
+    console.log('[WorkoutStart] program day id:', programDayId);
+
     if (!userResult.ok) {
+      console.log('[WorkoutStart] session insert success/error: error (not signed in)');
       return userResult;
     }
 
+    const sessionInsert = {
+      user_id: userResult.data,
+      program_day_id: programDayId,
+      started_at: new Date().toISOString(),
+    };
+
     const { data: session, error: sessionError } = await supabase
       .from('workout_sessions')
-      .insert({
-        program_day_id: programDayId,
-        started_at: new Date().toISOString(),
-        user_id: userResult.data,
-      })
+      .insert(sessionInsert)
       .select('id')
       .maybeSingle();
 
     if (sessionError || !session) {
-      console.log('[startWorkout] insert error', {
-        program_day_id: programDayId,
-        error_code: sessionError?.code,
-        error_message: sessionError?.message,
+      logOwnedDataError({
+        table: 'workout_sessions',
+        operation: 'insert',
+        userId: userResult.data,
+        error: sessionError ?? { message: 'Insert returned no session row' },
       });
+      console.log('[WorkoutStart] session insert success/error: error');
+      console.log('[WorkoutStart] session insert keys:', Object.keys(sessionInsert).join(','));
       return { ok: false, error: sessionError?.message ?? 'Could not start workout.' };
     }
 
-    console.log('[StartWorkout] session created', { sessionId: String(session.id) });
+    console.log('[WorkoutStart] session insert success/error: success');
 
     let previousPerformance: ExercisePreviousPerformance[] = [];
 
@@ -1170,6 +1179,12 @@ export async function startWorkoutForDay(programDayId: string): Promise<Result<{
       const { error: setsError } = await supabase.from('workout_sets').insert(setRows);
 
       if (setsError) {
+        logOwnedDataError({
+          table: 'workout_sets',
+          operation: 'insert',
+          userId: userResult.data,
+          error: setsError,
+        });
         await deleteSessionsAndSets([session.id]);
         return { ok: false, error: setsError.message };
       }

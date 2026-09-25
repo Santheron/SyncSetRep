@@ -5,6 +5,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
 import { formatWorkoutDate } from '@/lib/workout-format';
+import { useAuth } from '@/lib/auth-context';
 import {
   discardUnfinishedSessions,
   getLatestUnfinishedSession,
@@ -15,6 +16,7 @@ const palette = Colors.dark;
 
 export default function WorkoutScreen() {
   const router = useRouter();
+  const { user, isLoading: isAuthLoading } = useAuth();
   const [activeSession, setActiveSession] = useState<UnfinishedSession | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isWorking, setIsWorking] = useState(false);
@@ -143,6 +145,16 @@ export default function WorkoutScreen() {
 
   async function requestStartWorkout() {
     if (isWorking) {
+      return;
+    }
+
+    if (isAuthLoading) {
+      setErrorMessage('Finishing sign-in. Try Start Workout again in a moment.');
+      return;
+    }
+
+    if (!user) {
+      setErrorMessage('You must be signed in to start a workout.');
       return;
     }
 

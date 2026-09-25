@@ -8,7 +8,11 @@ import {
   createSessionFromUrl,
   parseAuthCallbackParams,
 } from '@/lib/auth-session-from-url';
-import { hasPasswordResetPending, isRecoveryAuthUrl } from '@/lib/password-recovery';
+import {
+  hasPasswordResetPending,
+  isRecoveryAuthUrl,
+  markPasswordResetPending,
+} from '@/lib/password-recovery';
 
 type RecoveryHandler = () => Promise<void>;
 
@@ -64,6 +68,18 @@ async function handleUrl(url: string | null, source: string) {
 
   processedUrls.add(identity);
 
+  const params = parseAuthCallbackParams(url);
+  const pendingReset = await hasPasswordResetPending();
+  const looksLikeRecovery =
+    isRecoveryAuthUrl(url) || params.type === 'recovery' || pendingReset;
+
+  if (looksLikeRecovery) {
+    await markPasswordResetPending();
+    for (const onRecovery of recoveryHandlers) {
+      await onRecovery();
+    }
+  }
+
   const result = await createSessionFromUrl(url);
 
   if (!result.ok) {
@@ -72,12 +88,13 @@ async function handleUrl(url: string | null, source: string) {
     return;
   }
 
-  const pendingReset = await hasPasswordResetPending();
-  const isRecovery = result.isRecovery || pendingReset || isRecoveryAuthUrl(url);
+  const isRecovery =
+    result.isRecovery || looksLikeRecovery || (await hasPasswordResetPending());
 
   console.log('[AuthPKCE] classified as recovery:', isRecovery);
 
   if (isRecovery) {
+    await markPasswordResetPending();
     for (const onRecovery of recoveryHandlers) {
       await onRecovery();
     }

@@ -82,9 +82,9 @@ export default function ResetPasswordScreen() {
         {session ? (
           <>
             <View style={styles.field}>
-              <Text style={styles.fieldLabel}>New password</Text>
+              <Text style={styles.fieldLabel}>New Password</Text>
               <TextInput
-                accessibilityLabel="New password"
+                accessibilityLabel="New Password"
                 autoCapitalize="none"
                 autoComplete="new-password"
                 onChangeText={setPassword}
@@ -97,9 +97,9 @@ export default function ResetPasswordScreen() {
             </View>
 
             <View style={styles.field}>
-              <Text style={styles.fieldLabel}>Confirm password</Text>
+              <Text style={styles.fieldLabel}>Confirm Password</Text>
               <TextInput
-                accessibilityLabel="Confirm password"
+                accessibilityLabel="Confirm Password"
                 autoCapitalize="none"
                 autoComplete="new-password"
                 onChangeText={setConfirmPassword}
@@ -118,7 +118,7 @@ export default function ResetPasswordScreen() {
         {session ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Save new password"
+            accessibilityLabel="Set New Password"
             disabled={isSubmitting}
             onPress={() => {
               void submit();
@@ -128,7 +128,7 @@ export default function ResetPasswordScreen() {
               (pressed || isSubmitting) && styles.pressed,
             ]}>
             <Text style={styles.primaryButtonLabel}>
-              {isSubmitting ? 'Saving...' : 'Save Password'}
+              {isSubmitting ? 'Saving...' : 'Set New Password'}
             </Text>
           </Pressable>
         ) : null}

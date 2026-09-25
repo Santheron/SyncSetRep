@@ -103,7 +103,7 @@ export function parseAuthCallbackParams(url: string): CallbackParams {
   return {
     code: firstParam(merged, ['code']),
     type: firstParam(merged, ['type']),
-    token_hash: firstParam(merged, ['token_hash']),
+    token_hash: firstParam(merged, ['token_hash', 'token']),
     access_token: firstParam(merged, ['access_token']),
     refresh_token: firstParam(merged, ['refresh_token']),
     sb_flow_id: firstParam(merged, ['sb_flow_id']),

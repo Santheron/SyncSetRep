@@ -1,6 +1,7 @@
 import type { User } from '@supabase/supabase-js'
 
 import { ensureOwnProgram } from '@/lib/programs'
+import { logOwnedDataError } from '@/lib/rls-error'
 import { supabase } from '@/lib/supabase'
 
 export type Profile = {
@@ -35,11 +36,20 @@ export async function ensureProfile(user: User): Promise<void> {
   const displayName = displayNameFromUser(user)
 
   if (!data) {
-    await supabase.from('profiles').insert({
+    const { error: insertError } = await supabase.from('profiles').insert({
       id: user.id,
       display_name: displayName,
       preferred_weight_unit: 'lb',
     })
+
+    if (insertError) {
+      logOwnedDataError({
+        table: 'profiles',
+        operation: 'insert',
+        userId: user.id,
+        error: insertError,
+      })
+    }
   } else if (!data.display_name && displayName) {
     await supabase
       .from('profiles')

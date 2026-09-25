@@ -23,7 +23,7 @@ export default function ForgotPasswordScreen() {
   const { requestPasswordReset } = useAuth();
   const [email, setEmail] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [emailSent, setEmailSent] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   async function submit() {
@@ -38,7 +38,6 @@ export default function ForgotPasswordScreen() {
 
     setIsSubmitting(true);
     setErrorMessage(null);
-    setInfoMessage(null);
 
     const result = await requestPasswordReset(email);
 
@@ -49,8 +48,30 @@ export default function ForgotPasswordScreen() {
       return;
     }
 
-    setInfoMessage(
-      'If that email is registered, we sent a reset link. Open it on this phone to set a new password.',
+    setEmailSent(true);
+  }
+
+  if (emailSent) {
+    return (
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.flex}>
+        <Screen keyboardShouldPersistTaps="handled">
+          <Text style={styles.kicker}>SyncSetRep</Text>
+          <Text style={styles.title}>Check your email</Text>
+          <Text style={styles.subtitle}>
+            If that email is registered, we sent a reset link. Open it on this phone to
+            set a new password.
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Back to Sign In"
+            onPress={() => router.replace('/sign-in')}
+            style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}>
+            <Text style={styles.primaryButtonLabel}>Back to Sign In</Text>
+          </Pressable>
+        </Screen>
+      </KeyboardAvoidingView>
     );
   }
 
@@ -81,7 +102,6 @@ export default function ForgotPasswordScreen() {
         </View>
 
         {errorMessage ? <Text style={styles.error}>{errorMessage}</Text> : null}
-        {infoMessage ? <Text style={styles.info}>{infoMessage}</Text> : null}
 
         <Pressable
           accessibilityRole="button"
@@ -153,11 +173,6 @@ const styles = StyleSheet.create({
   error: {
     color: palette.text,
     fontSize: 16,
-  },
-  info: {
-    color: palette.accent,
-    fontSize: 16,
-    fontWeight: '700',
   },
   primaryButton: {
     backgroundColor: palette.accent,

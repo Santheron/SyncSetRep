@@ -1,11 +1,14 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
+import * as Linking from 'expo-linking';
 
 import { subscribeAuthDeepLinks } from '@/lib/auth-deep-link';
-import { AUTH_EMAIL_REDIRECT_TO } from '@/lib/auth-redirect';
+import { isAuthCallbackUrl, logAuthRedirectTarget } from '@/lib/auth-redirect';
 import {
   clearPasswordResetPending,
   hasPasswordResetPending,
+  hasPasswordResetPendingSync,
+  isRecoveryAuthUrl,
   markPasswordResetPending,
 } from '@/lib/password-recovery';
 import { ensureProfile } from '@/lib/profile';
@@ -43,58 +46,97 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isPasswordRecovery, setIsPasswordRecovery] = useState(false);
+  const initializedRef = useRef(false);
 
   useEffect(() => {
     let isMounted = true;
 
-    supabase.auth
-      .getSession()
-      .then(async ({ data }) => {
-        const pending = await hasPasswordResetPending();
+    void (async () => {
+      try {
+        const [{ data }, pending, initialUrl] = await Promise.all([
+          supabase.auth.getSession(),
+          hasPasswordResetPending(),
+          Linking.getInitialURL().catch(() => null),
+        ]);
+
+        const recoveryUrl = isRecoveryAuthUrl(initialUrl);
+        const callbackUrl = isAuthCallbackUrl(initialUrl);
+
+        if (recoveryUrl || (pending && callbackUrl)) {
+          await markPasswordResetPending();
+        }
 
         if (!isMounted) {
           return;
         }
 
+        const recovery = Boolean(
+          pending || recoveryUrl || hasPasswordResetPendingSync(),
+        );
+
         setSession(data.session);
-        setIsPasswordRecovery(Boolean(data.session && pending));
+        setIsPasswordRecovery(
+          Boolean(data.session && recovery) || recoveryUrl || (recovery && callbackUrl),
+        );
+        initializedRef.current = true;
         setIsLoading(false);
 
-        if (data.session?.user && !pending) {
+        if (data.session?.user && !recovery) {
           void ensureProfile(data.session.user);
         }
-      })
-      .catch(() => {
+      } catch {
         if (isMounted) {
           setSession(null);
           setIsPasswordRecovery(false);
+          initializedRef.current = true;
           setIsLoading(false);
         }
-      });
+      }
+    })();
 
     const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
-      setSession(nextSession);
-      setIsLoading(false);
-
       if (event === 'PASSWORD_RECOVERY') {
         console.log('[AuthPKCE] onAuthStateChange: PASSWORD_RECOVERY');
+        setSession(nextSession);
         setIsPasswordRecovery(true);
         void markPasswordResetPending();
+        if (initializedRef.current) {
+          setIsLoading(false);
+        }
         return;
       }
 
       if (event === 'SIGNED_OUT') {
+        setSession(null);
         setIsPasswordRecovery(false);
         void clearPasswordResetPending();
+        if (initializedRef.current) {
+          setIsLoading(false);
+        }
         return;
       }
 
-      if (nextSession?.user) {
+      setSession(nextSession);
+
+      if (
+        (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') &&
+        hasPasswordResetPendingSync()
+      ) {
+        setIsPasswordRecovery(true);
+      }
+
+      if (nextSession?.user && !hasPasswordResetPendingSync()) {
         void hasPasswordResetPending().then((pending) => {
           if (!pending) {
             void ensureProfile(nextSession.user);
+          } else {
+            setIsPasswordRecovery(true);
           }
         });
+      }
+
+      if (initializedRef.current) {
+        setIsLoading(false);
       }
     });
 
@@ -138,7 +180,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           email: email.trim(),
           password,
           options: {
-            emailRedirectTo: AUTH_EMAIL_REDIRECT_TO,
+            emailRedirectTo: logAuthRedirectTarget(),
             data: {
               display_name: displayName.trim(),
             },
@@ -169,13 +211,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { error: error?.message ?? null };
       },
       async requestPasswordReset(email) {
+        const redirectTo = logAuthRedirectTarget();
         console.log('[AuthPKCE] verifier exists before reset request:', hasPkceVerifier());
         console.log('[AuthPKCE] stored verifier keys before reset:', listPkceStorageKeys().join(', ') || '(none)');
-        console.log('[AuthPKCE] reset redirectTo:', AUTH_EMAIL_REDIRECT_TO);
+        console.log('[AuthPKCE] reset redirectTo:', redirectTo);
         await markPasswordResetPending();
 
         const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-          redirectTo: AUTH_EMAIL_REDIRECT_TO,
+          redirectTo,
         });
 
         console.log(
@@ -189,7 +232,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         if (error) {
           await clearPasswordResetPending();
-          return { error: error.message };
+          if (error.status === 429) {
+            return { error: 'Please wait a minute and try again.' };
+          }
+          return { error: 'Could not send the reset email. Try again.' };
         }
 
         return { error: null };

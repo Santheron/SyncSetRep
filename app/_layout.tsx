@@ -30,18 +30,22 @@ export const unstable_settings = {
 
 function RootNavigator() {
   const { session, isLoading, isPasswordRecovery } = useAuth();
+  const hasSession = Boolean(session);
+  const allowApp = hasSession && !isPasswordRecovery;
+  const allowRecovery = isPasswordRecovery;
+  const allowAuthForms = !hasSession;
 
   return (
     <>
       <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Protected guard={!!session && !isPasswordRecovery}>
+        <Stack.Protected guard={allowApp}>
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
           <Stack.Screen name="workout" options={{ headerShown: false }} />
         </Stack.Protected>
-        <Stack.Protected guard={isPasswordRecovery}>
+        <Stack.Protected guard={allowRecovery}>
           <Stack.Screen name="reset-password" options={{ headerShown: false }} />
         </Stack.Protected>
-        <Stack.Protected guard={!session && !isPasswordRecovery}>
+        <Stack.Protected guard={allowAuthForms}>
           <Stack.Screen name="sign-in" options={{ headerShown: false }} />
           <Stack.Screen name="sign-up" options={{ headerShown: false }} />
           <Stack.Screen name="forgot-password" options={{ headerShown: false }} />

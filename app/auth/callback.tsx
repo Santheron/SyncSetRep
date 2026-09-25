@@ -143,6 +143,13 @@ export default function AuthCallbackScreen() {
       setErrorMessage(null);
       console.log('[AuthPKCE] callback received');
 
+      const pendingBefore = await hasPasswordResetPending();
+      const looksLikeRecovery = isRecoveryAuthUrl(candidate) || pendingBefore;
+
+      if (looksLikeRecovery) {
+        await beginPasswordRecoveryRef.current();
+      }
+
       const result = await createSessionFromUrl(candidate);
 
       if (!isMounted) {
@@ -157,7 +164,7 @@ export default function AuthCallbackScreen() {
       }
 
       const pendingReset = await hasPasswordResetPending();
-      const isRecovery = result.isRecovery || pendingReset || isRecoveryAuthUrl(candidate);
+      const isRecovery = result.isRecovery || pendingReset || looksLikeRecovery;
 
       if (isRecovery) {
         await beginPasswordRecoveryRef.current();
