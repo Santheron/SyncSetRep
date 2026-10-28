@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   KeyboardAvoidingView,
   Platform,
@@ -13,6 +13,12 @@ import { useRouter } from 'expo-router';
 import { Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
 import { useAuth } from '@/lib/auth-context';
+import { getAuthEmailRedirectTo } from '@/lib/auth-redirect';
+import {
+  CONFIRMATION_REQUEST_ACCEPTED,
+  RESEND_COOLDOWN_MS,
+  resendCooldownSeconds,
+} from '@/lib/auth-signup';
 
 const palette = Colors.dark;
 
@@ -20,14 +26,32 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function SignUpScreen() {
   const router = useRouter();
-  const { signUp } = useAuth();
+  const { signUp, resendSignUpConfirmation } = useAuth();
+  const confirmationRedirect = getAuthEmailRedirectTo();
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
+  const [resendAvailableAt, setResendAvailableAt] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const cooldownSeconds = resendCooldownSeconds(resendAvailableAt, now);
+
+  useEffect(() => {
+    if (!pendingEmail) {
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [pendingEmail]);
 
   async function submit() {
     if (isSubmitting) {
@@ -56,22 +80,47 @@ export default function SignUpScreen() {
 
     setIsSubmitting(true);
     setErrorMessage(null);
-    setInfoMessage(null);
 
     const result = await signUp(email, password, displayName);
+    setIsSubmitting(false);
 
     if (result.error) {
       setErrorMessage(result.error);
-      setIsSubmitting(false);
       return;
     }
 
     if (result.needsConfirmation) {
-      setInfoMessage(
-        'Check your email to confirm your account. Open the confirmation link on this phone to finish signing in.',
-      );
-      setIsSubmitting(false);
+      const requestedAt = Date.now();
+      setPendingEmail(email.trim());
+      setResendAvailableAt(requestedAt + RESEND_COOLDOWN_MS);
+      setNow(requestedAt);
     }
+  }
+
+  async function resendConfirmation() {
+    if (!pendingEmail || isSubmitting || cooldownSeconds > 0) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    setErrorMessage(null);
+    const result = await resendSignUpConfirmation(pendingEmail);
+    setIsSubmitting(false);
+
+    if (result.error) {
+      setErrorMessage(result.error);
+      return;
+    }
+
+    const requestedAt = Date.now();
+    setResendAvailableAt(requestedAt + RESEND_COOLDOWN_MS);
+    setNow(requestedAt);
+  }
+
+  function editSignup() {
+    setPendingEmail(null);
+    setErrorMessage(null);
+    setIsSubmitting(false);
   }
 
   return (
@@ -80,9 +129,58 @@ export default function SignUpScreen() {
       style={styles.flex}>
       <Screen keyboardShouldPersistTaps="handled">
         <Text style={styles.kicker}>SyncSetRep</Text>
-        <Text style={styles.title}>Sign Up</Text>
-        <Text style={styles.subtitle}>Create an account to keep your workouts private.</Text>
+        <Text style={styles.title}>{pendingEmail ? 'Check your email' : 'Sign Up'}</Text>
+        <Text style={styles.subtitle}>
+          {pendingEmail
+            ? CONFIRMATION_REQUEST_ACCEPTED
+            : 'Create an account to keep your workouts private.'}
+        </Text>
+        <Text accessibilityLabel="Confirmation redirect" style={styles.diagnostic}>
+          Email links return to {confirmationRedirect}
+        </Text>
 
+        {pendingEmail ? (
+          <>
+            <Text style={styles.info}>{pendingEmail}</Text>
+            {errorMessage ? <Text style={styles.error}>{errorMessage}</Text> : null}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Resend confirmation email"
+              disabled={isSubmitting || cooldownSeconds > 0}
+              onPress={() => {
+                void resendConfirmation();
+              }}
+              style={({ pressed }) => [
+                styles.primaryButton,
+                (pressed || isSubmitting || cooldownSeconds > 0) && styles.pressed,
+              ]}>
+              <Text style={styles.primaryButtonLabel}>
+                {isSubmitting
+                  ? 'Requesting...'
+                  : cooldownSeconds > 0
+                    ? `Resend available in ${cooldownSeconds}s`
+                    : 'Resend confirmation email'}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Use a different email"
+              onPress={editSignup}
+              style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
+              <Text style={styles.secondaryButtonLabel}>Use a different email</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Sign in instead"
+              onPress={() => router.replace('/sign-in')}
+              style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
+              <Text style={styles.secondaryButtonLabel}>Already have an account? Sign In</Text>
+            </Pressable>
+          </>
+        ) : null}
+
+        {pendingEmail ? null : (
+        <>
         <View style={styles.field}>
           <Text style={styles.fieldLabel}>Display name</Text>
           <TextInput
@@ -143,7 +241,6 @@ export default function SignUpScreen() {
         </View>
 
         {errorMessage ? <Text style={styles.error}>{errorMessage}</Text> : null}
-        {infoMessage ? <Text style={styles.info}>{infoMessage}</Text> : null}
 
         <Pressable
           accessibilityRole="button"
@@ -165,6 +262,8 @@ export default function SignUpScreen() {
           style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
           <Text style={styles.secondaryButtonLabel}>Already have an account? Sign In</Text>
         </Pressable>
+        </>
+        )}
       </Screen>
     </KeyboardAvoidingView>
   );
@@ -191,6 +290,10 @@ const styles = StyleSheet.create({
     color: palette.muted,
     fontSize: 16,
     marginBottom: 4,
+  },
+  diagnostic: {
+    color: palette.muted,
+    fontSize: 13,
   },
   field: {
     gap: 8,

@@ -9,6 +9,7 @@ import { Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
 import { useAuth } from '@/lib/auth-context';
 import { isAuthCallbackUrl } from '@/lib/auth-redirect';
+import { callbackIsPasswordRecovery } from '@/lib/auth-signup';
 import {
   createSessionFromUrl,
   parseAuthCallbackParams,
@@ -70,17 +71,19 @@ function pickCallbackUrl(
 
 export default function AuthCallbackScreen() {
   const router = useRouter();
-  const { beginPasswordRecovery } = useAuth();
+  const { beginPasswordRecovery, endPasswordRecovery } = useAuth();
   const routeParams = useLocalSearchParams<Record<string, string | string[]>>();
   const routeParamKey = JSON.stringify(routeParams);
   const linkingUrl = Linking.useLinkingURL();
   const beginPasswordRecoveryRef = useRef(beginPasswordRecovery);
+  const endPasswordRecoveryRef = useRef(endPasswordRecovery);
   const routerRef = useRef(router);
   const didLogMount = useRef(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isHandling, setIsHandling] = useState(true);
 
   beginPasswordRecoveryRef.current = beginPasswordRecovery;
+  endPasswordRecoveryRef.current = endPasswordRecovery;
   routerRef.current = router;
 
   if (!didLogMount.current) {
@@ -120,18 +123,30 @@ export default function AuthCallbackScreen() {
         console.log('[AuthPKCE] callback already handled; skipping duplicate');
         const pendingReset = await hasPasswordResetPending();
         const { data } = await supabase.auth.getSession();
+        const urlType = parseAuthCallbackParams(candidate).type;
 
         if (!isMounted) {
           return;
         }
 
-        if (data.session && (pendingReset || isRecoveryAuthUrl(candidate))) {
+        if (
+          data.session &&
+          callbackIsPasswordRecovery({
+            urlType,
+            passwordResetPending: pendingReset,
+            sessionIsRecovery: isRecoveryAuthUrl(candidate),
+          })
+        ) {
           await beginPasswordRecoveryRef.current();
           routerRef.current.replace('/reset-password');
           return;
         }
 
         if (data.session) {
+          if (urlType === 'signup' || urlType === 'email') {
+            await endPasswordRecoveryRef.current();
+          }
+
           routerRef.current.replace('/');
         }
 
@@ -143,11 +158,18 @@ export default function AuthCallbackScreen() {
       setErrorMessage(null);
       console.log('[AuthPKCE] callback received');
 
+      const urlType = parseAuthCallbackParams(candidate).type;
       const pendingBefore = await hasPasswordResetPending();
-      const looksLikeRecovery = isRecoveryAuthUrl(candidate) || pendingBefore;
+      const looksLikeRecovery = callbackIsPasswordRecovery({
+        urlType,
+        passwordResetPending: pendingBefore,
+        sessionIsRecovery: false,
+      });
 
       if (looksLikeRecovery) {
         await beginPasswordRecoveryRef.current();
+      } else if (urlType === 'signup' || urlType === 'email') {
+        await endPasswordRecoveryRef.current();
       }
 
       const result = await createSessionFromUrl(candidate);
@@ -164,12 +186,20 @@ export default function AuthCallbackScreen() {
       }
 
       const pendingReset = await hasPasswordResetPending();
-      const isRecovery = result.isRecovery || pendingReset || looksLikeRecovery;
+      const isRecovery = callbackIsPasswordRecovery({
+        urlType,
+        passwordResetPending: pendingReset,
+        sessionIsRecovery: result.isRecovery,
+      });
 
       if (isRecovery) {
         await beginPasswordRecoveryRef.current();
         routerRef.current.replace('/reset-password');
         return;
+      }
+
+      if (urlType === 'signup' || urlType === 'email') {
+        await endPasswordRecoveryRef.current();
       }
 
       routerRef.current.replace('/');

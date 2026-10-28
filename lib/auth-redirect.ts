@@ -1,113 +1,79 @@
 import Constants from 'expo-constants';
 import * as Linking from 'expo-linking';
+import { NativeModules } from 'react-native';
 
-const DEVELOPMENT_SCHEME = 'workouttracker-dev';
-const PRODUCTION_SCHEME = 'workouttracker';
-const DEVELOPMENT_ANDROID_PACKAGE = 'com.akagi253.workouttracker.dev';
-const PRODUCTION_ANDROID_PACKAGE = 'com.akagi253.workouttracker';
+import {
+  readExpoConfigIdentity,
+  selectAuthRedirect,
+  type AuthRedirectDiagnostics,
+} from '@/lib/auth-scheme';
 
-function firstString(value: unknown): string | null {
-  if (typeof value === 'string' && value.trim()) {
-    return value.trim();
+export type { AuthRedirectDiagnostics, AuthSchemeSource } from '@/lib/auth-scheme';
+
+function linkingCallbackUrl(): string | null {
+  try {
+    return Linking.createURL('auth/callback');
+  } catch {
+    return null;
   }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      if (typeof item === 'string' && item.trim()) {
-        return item.trim();
-      }
-    }
-  }
-
-  return null;
 }
 
-function installedAndroidPackage(): string | null {
-  const platformAndroid = (
-    Constants.platform as { android?: { package?: string } } | undefined
-  )?.android?.package;
-
-  return firstString(platformAndroid) ?? firstString(Constants.expoConfig?.android?.package);
+function embeddedManifest(): unknown {
+  const constants = (NativeModules as { ExponentConstants?: { manifest?: unknown } }).ExponentConstants;
+  return constants?.manifest;
 }
 
-function installedIosBundle(): string | null {
-  return firstString(Constants.expoConfig?.ios?.bundleIdentifier);
+export function getAuthRedirectDiagnostics(): AuthRedirectDiagnostics {
+  const embedded = readExpoConfigIdentity(embeddedManifest());
+  const configured = readExpoConfigIdentity(Constants.expoConfig);
+
+  return selectAuthRedirect({
+    appVariant: process.env.APP_VARIANT,
+    dev: __DEV__,
+    executionEnvironment: Constants.executionEnvironment ?? null,
+    embeddedAndroidPackage: embedded.androidPackage,
+    embeddedIosBundle: embedded.iosBundle,
+    embeddedScheme: embedded.scheme,
+    configuredAndroidPackage: configured.androidPackage,
+    configuredScheme: configured.scheme,
+    linkingUrl: linkingCallbackUrl(),
+  });
 }
 
 export function resolveAuthScheme(): string {
-  const variant = process.env.APP_VARIANT;
-
-  if (variant === 'development') {
-    return DEVELOPMENT_SCHEME;
-  }
-
-  if (variant === 'preview' || variant === 'production') {
-    return PRODUCTION_SCHEME;
-  }
-
-  const androidPackage = installedAndroidPackage() ?? '';
-  const iosBundle = installedIosBundle() ?? '';
-
-  if (
-    androidPackage === DEVELOPMENT_ANDROID_PACKAGE ||
-    androidPackage.endsWith('.dev') ||
-    iosBundle.endsWith('.dev')
-  ) {
-    return DEVELOPMENT_SCHEME;
-  }
-
-  if (androidPackage === PRODUCTION_ANDROID_PACKAGE) {
-    return PRODUCTION_SCHEME;
-  }
-
-  const expoScheme = firstString(Constants.expoConfig?.scheme);
-
-  if (expoScheme === DEVELOPMENT_SCHEME) {
-    return DEVELOPMENT_SCHEME;
-  }
-
-  // Metro evaluates app.config.ts without APP_VARIANT, so expoConfig.scheme
-  // becomes "workouttracker" even when the installed development APK uses
-  // workouttracker-dev. Prefer the development scheme while JS is in __DEV__.
-  if (__DEV__) {
-    return DEVELOPMENT_SCHEME;
-  }
-
-  if (expoScheme === PRODUCTION_SCHEME) {
-    return PRODUCTION_SCHEME;
-  }
-
-  if (expoScheme) {
-    return expoScheme;
-  }
-
-  const created = Linking.createURL('auth/callback');
-  if (created.startsWith(`${DEVELOPMENT_SCHEME}:`)) {
-    return DEVELOPMENT_SCHEME;
-  }
-  if (created.startsWith(`${PRODUCTION_SCHEME}:`)) {
-    return PRODUCTION_SCHEME;
-  }
-
-  return PRODUCTION_SCHEME;
+  return getAuthRedirectDiagnostics().scheme;
 }
 
 export function getAuthEmailRedirectTo(): string {
-  return `${resolveAuthScheme()}://auth/callback`;
+  return getAuthRedirectDiagnostics().redirectTo;
 }
 
 export function logAuthRedirectTarget(): string {
-  const url = getAuthEmailRedirectTo();
-  console.log('[AuthRedirect] APP_VARIANT:', process.env.APP_VARIANT ?? '(unset)');
-  console.log('[AuthRedirect] __DEV__:', __DEV__);
-  console.log('[AuthRedirect] expoConfig.scheme:', JSON.stringify(Constants.expoConfig?.scheme ?? null));
-  console.log('[AuthRedirect] android.package:', installedAndroidPackage() ?? '(none)');
-  console.log('[AuthRedirect] scheme:', resolveAuthScheme());
-  console.log('[AuthRedirect] redirectTo:', url);
-  return url;
-}
+  const diagnostics = getAuthRedirectDiagnostics();
 
-export const AUTH_EMAIL_REDIRECT_TO = getAuthEmailRedirectTo();
+  console.log('[AuthRedirect] scheme:', diagnostics.scheme);
+  console.log('[AuthRedirect] redirectTo:', diagnostics.redirectTo);
+  console.log('[AuthRedirect] source:', diagnostics.source);
+  console.log('[AuthRedirect] APP_VARIANT:', diagnostics.appVariant ?? '(unset)');
+  console.log('[AuthRedirect] __DEV__:', diagnostics.dev);
+  console.log('[AuthRedirect] executionEnvironment:', diagnostics.executionEnvironment ?? '(none)');
+  console.log('[AuthRedirect] embeddedAndroidPackage:', diagnostics.embeddedAndroidPackage ?? '(none)');
+  console.log('[AuthRedirect] embeddedScheme:', diagnostics.embeddedScheme ?? '(none)');
+  console.log('[AuthRedirect] configuredAndroidPackage:', diagnostics.configuredAndroidPackage ?? '(none)');
+  console.log('[AuthRedirect] configuredScheme:', diagnostics.configuredScheme ?? '(none)');
+
+  if (
+    diagnostics.configuredScheme &&
+    diagnostics.configuredScheme !== diagnostics.scheme
+  ) {
+    console.log(
+      '[AuthRedirect] Metro scheme differs from the scheme sent to Supabase:',
+      diagnostics.configuredScheme,
+    );
+  }
+
+  return diagnostics.redirectTo;
+}
 
 export function isAuthCallbackUrl(url: string | null | undefined): boolean {
   if (!url) {

@@ -4,11 +4,13 @@ import * as Linking from 'expo-linking';
 import { router } from 'expo-router';
 
 import { isAuthCallbackUrl } from '@/lib/auth-redirect';
+import { callbackIsPasswordRecovery } from '@/lib/auth-signup';
 import {
   createSessionFromUrl,
   parseAuthCallbackParams,
 } from '@/lib/auth-session-from-url';
 import {
+  clearPasswordResetPending,
   hasPasswordResetPending,
   isRecoveryAuthUrl,
   markPasswordResetPending,
@@ -70,14 +72,19 @@ async function handleUrl(url: string | null, source: string) {
 
   const params = parseAuthCallbackParams(url);
   const pendingReset = await hasPasswordResetPending();
-  const looksLikeRecovery =
-    isRecoveryAuthUrl(url) || params.type === 'recovery' || pendingReset;
+  const looksLikeRecovery = callbackIsPasswordRecovery({
+    urlType: params.type,
+    passwordResetPending: pendingReset,
+    sessionIsRecovery: isRecoveryAuthUrl(url),
+  });
 
   if (looksLikeRecovery) {
     await markPasswordResetPending();
     for (const onRecovery of recoveryHandlers) {
       await onRecovery();
     }
+  } else if (params.type === 'signup' || params.type === 'email') {
+    await clearPasswordResetPending();
   }
 
   const result = await createSessionFromUrl(url);
@@ -88,8 +95,11 @@ async function handleUrl(url: string | null, source: string) {
     return;
   }
 
-  const isRecovery =
-    result.isRecovery || looksLikeRecovery || (await hasPasswordResetPending());
+  const isRecovery = callbackIsPasswordRecovery({
+    urlType: params.type,
+    passwordResetPending: looksLikeRecovery || (await hasPasswordResetPending()),
+    sessionIsRecovery: result.isRecovery,
+  });
 
   console.log('[AuthPKCE] classified as recovery:', isRecovery);
 

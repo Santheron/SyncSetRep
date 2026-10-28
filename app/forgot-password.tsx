@@ -13,6 +13,7 @@ import { useRouter } from 'expo-router';
 import { Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
 import { useAuth } from '@/lib/auth-context';
+import { getAuthEmailRedirectTo } from '@/lib/auth-redirect';
 
 const palette = Colors.dark;
 
@@ -21,6 +22,7 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export default function ForgotPasswordScreen() {
   const router = useRouter();
   const { requestPasswordReset } = useAuth();
+  const resetRedirect = getAuthEmailRedirectTo();
   const [email, setEmail] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [emailSent, setEmailSent] = useState(false);
@@ -63,6 +65,9 @@ export default function ForgotPasswordScreen() {
             If that email is registered, we sent a reset link. Open it on this phone to
             set a new password.
           </Text>
+          <Text accessibilityLabel="Password reset redirect" style={styles.diagnostic}>
+            Email links return to {resetRedirect}
+          </Text>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Back to Sign In"
@@ -84,6 +89,9 @@ export default function ForgotPasswordScreen() {
         <Text style={styles.title}>Forgot Password?</Text>
         <Text style={styles.subtitle}>
           Enter your account email and we will send a link to choose a new password.
+        </Text>
+        <Text accessibilityLabel="Password reset redirect" style={styles.diagnostic}>
+          Email links return to {resetRedirect}
         </Text>
 
         <View style={styles.field}>
@@ -149,6 +157,10 @@ const styles = StyleSheet.create({
     color: palette.muted,
     fontSize: 16,
     marginBottom: 4,
+  },
+  diagnostic: {
+    color: palette.muted,
+    fontSize: 13,
   },
   field: {
     gap: 8,

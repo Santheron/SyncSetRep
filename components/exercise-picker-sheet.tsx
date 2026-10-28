@@ -12,6 +12,11 @@ import {
 } from 'react-native';
 
 import { Colors } from '@/constants/theme';
+import {
+  exercisesForPicker,
+  matchCatalogExercise,
+  PRIVATE_EXERCISE_UNAVAILABLE,
+} from '@/lib/exercise-swap';
 import type { WorkoutExercise } from '@/lib/workout-session';
 
 const palette = Colors.dark;
@@ -29,28 +34,29 @@ type EquipmentFilter = (typeof EQUIPMENT_FILTERS)[number];
 
 type ExercisePickerSheetProps = {
   visible: boolean;
+  currentExerciseId: string;
   currentName: string;
+  currentCategory: string;
+  currentEquipmentType: string | null;
+  canReplaceInProgram: boolean;
   exercises: WorkoutExercise[];
   isLoading: boolean;
+  isSubmitting: boolean;
   errorMessage: string | null;
   onClose: () => void;
   onConfirm: (exercise: WorkoutExercise, scope: 'session' | 'program') => void;
 };
 
-function matchesEquipment(exercise: WorkoutExercise, filter: EquipmentFilter): boolean {
-  if (filter === 'All') {
-    return true;
-  }
-
-  const equipment = (exercise.equipmentType ?? '').trim().toLowerCase();
-  return equipment === filter.toLowerCase() || equipment.includes(filter.toLowerCase());
-}
-
 export function ExercisePickerSheet({
   visible,
+  currentExerciseId,
   currentName,
+  currentCategory,
+  currentEquipmentType,
+  canReplaceInProgram,
   exercises,
   isLoading,
+  isSubmitting,
   errorMessage,
   onClose,
   onConfirm,
@@ -58,40 +64,63 @@ export function ExercisePickerSheet({
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<EquipmentFilter>('All');
   const [selected, setSelected] = useState<WorkoutExercise | null>(null);
+  const [customName, setCustomName] = useState('');
+  const [customMessage, setCustomMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!visible) {
       setQuery('');
       setFilter('All');
       setSelected(null);
+      setCustomName('');
+      setCustomMessage(null);
     }
   }, [visible]);
 
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-
-    return exercises.filter((exercise) => {
-      if (!matchesEquipment(exercise, filter)) {
-        return false;
-      }
-
-      if (!needle) {
-        return true;
-      }
-
-      return (
-        exercise.name.toLowerCase().includes(needle) ||
-        exercise.category.toLowerCase().includes(needle) ||
-        (exercise.equipmentType ?? '').toLowerCase().includes(needle)
-      );
-    });
-  }, [exercises, filter, query]);
+  const filtered = useMemo(
+    () =>
+      exercisesForPicker({
+        exercises,
+        current: {
+          id: currentExerciseId,
+          name: currentName,
+          category: currentCategory,
+          equipmentType: currentEquipmentType,
+        },
+        query,
+        equipmentFilter: filter,
+      }),
+    [currentCategory, currentEquipmentType, currentExerciseId, currentName, exercises, filter, query],
+  );
 
   function resetAndClose() {
+    if (isSubmitting) {
+      return;
+    }
+
     setQuery('');
     setFilter('All');
     setSelected(null);
+    setCustomName('');
+    setCustomMessage(null);
     onClose();
+  }
+
+  function useCustomName() {
+    const match = matchCatalogExercise(exercises, customName);
+
+    if (!match) {
+      setCustomMessage(PRIVATE_EXERCISE_UNAVAILABLE);
+      return;
+    }
+
+    if (match.id === currentExerciseId) {
+      setCustomMessage('That is already the exercise in this slot. The workout was not changed.');
+      return;
+    }
+
+    setCustomMessage(null);
+    setSelected(match);
   }
 
   return (
@@ -117,23 +146,39 @@ export function ExercisePickerSheet({
                 Replace {currentName}
                 {'\n'}with {selected.name}?
               </Text>
+              {errorMessage ? <Text style={styles.error}>{errorMessage}</Text> : null}
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Just this workout"
+                accessibilityLabel="Swap for this workout only"
+                disabled={isSubmitting}
                 onPress={() => onConfirm(selected, 'session')}
-                style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}>
-                <Text style={styles.primaryButtonLabel}>Just This Workout</Text>
+                style={({ pressed }) => [
+                  styles.primaryButton,
+                  (pressed || isSubmitting) && styles.pressed,
+                ]}>
+                <Text style={styles.primaryButtonLabel}>
+                  {isSubmitting ? 'Swapping...' : 'Swap for this workout only'}
+                </Text>
               </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Replace in program"
-                onPress={() => onConfirm(selected, 'program')}
-                style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
-                <Text style={styles.secondaryButtonLabel}>Replace In Program</Text>
-              </Pressable>
+              {canReplaceInProgram ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Replace the exercise in my program"
+                  disabled={isSubmitting}
+                  onPress={() => onConfirm(selected, 'program')}
+                  style={({ pressed }) => [
+                    styles.secondaryButton,
+                    (pressed || isSubmitting) && styles.pressed,
+                  ]}>
+                  <Text style={styles.secondaryButtonLabel}>Replace in my program</Text>
+                </Pressable>
+              ) : (
+                <Text style={styles.status}>This slot can be swapped for this workout only.</Text>
+              )}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Cancel replace"
+                disabled={isSubmitting}
                 onPress={() => setSelected(null)}
                 style={({ pressed }) => [styles.cancelButton, pressed && styles.pressed]}>
                 <Text style={styles.cancelButtonLabel}>Cancel</Text>
@@ -184,10 +229,17 @@ export function ExercisePickerSheet({
                 <Text style={styles.error}>{errorMessage}</Text>
               ) : (
                 <FlatList
-                  data={filtered}
+                  data={filtered.exercises}
                   keyExtractor={(item) => item.id}
                   keyboardShouldPersistTaps="handled"
                   style={styles.list}
+                  ListHeaderComponent={
+                    filtered.showingSuggestions ? (
+                      <Text style={styles.status}>
+                        Matches for this muscle group. Search to see the full catalog.
+                      </Text>
+                    ) : null
+                  }
                   ListEmptyComponent={
                     <Text style={styles.status}>No matching exercises.</Text>
                   }
@@ -205,6 +257,26 @@ export function ExercisePickerSheet({
                   )}
                 />
               )}
+              <Text style={styles.fieldLabel}>{"Can't find it?"}</Text>
+              <TextInput
+                accessibilityLabel="Exercise name to look up"
+                onChangeText={(value) => {
+                  setCustomName(value);
+                  setCustomMessage(null);
+                }}
+                placeholder="Type the catalog name"
+                placeholderTextColor={palette.muted}
+                style={styles.search}
+                value={customName}
+              />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Look up exercise name"
+                onPress={useCustomName}
+                style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
+                <Text style={styles.secondaryButtonLabel}>Look up this exercise</Text>
+              </Pressable>
+              {customMessage ? <Text style={styles.error}>{customMessage}</Text> : null}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Cancel swap"
@@ -252,6 +324,13 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '800',
   },
+  fieldLabel: {
+    color: palette.muted,
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
   search: {
     minHeight: 48,
     borderRadius: 12,
@@ -290,7 +369,7 @@ const styles = StyleSheet.create({
     color: palette.accentText,
   },
   list: {
-    maxHeight: 360,
+    maxHeight: 280,
   },
   row: {
     minHeight: 56,
@@ -325,11 +404,13 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 12,
   },
   primaryButtonLabel: {
     color: palette.accentText,
     fontSize: 16,
     fontWeight: '800',
+    textAlign: 'center',
   },
   secondaryButton: {
     minHeight: 52,
@@ -338,11 +419,13 @@ const styles = StyleSheet.create({
     borderColor: palette.accent,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 12,
   },
   secondaryButtonLabel: {
     color: palette.accent,
     fontSize: 16,
     fontWeight: '800',
+    textAlign: 'center',
   },
   cancelButton: {
     minHeight: 48,

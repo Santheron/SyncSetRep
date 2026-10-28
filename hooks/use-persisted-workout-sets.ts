@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
+import { DUPLICATE_SLOT_MESSAGE, parseSetKey, setKey } from '@/lib/exercise-swap';
 import {
   formatSetInput,
   parseOptionalReps,
   parseOptionalRir,
   parseOptionalWeight,
   saveWorkoutSet,
-  setKey,
   type WorkoutSetRecord,
 } from '@/lib/workout-session';
 
@@ -33,7 +33,7 @@ function recordsToState(sets: WorkoutSetRecord[]) {
   const ids: Record<string, string> = {};
 
   for (const set of sets) {
-    const key = setKey(set.exerciseId, set.setNumber);
+    const key = setKey(set.slotId || set.exerciseId, set.exerciseId, set.setNumber);
     inputs[key] = {
       weight: formatSetInput(set.weight),
       reps: formatSetInput(set.reps),
@@ -63,6 +63,7 @@ export function usePersistedWorkoutSets(
   const chainRef = useRef<Record<string, Promise<void>>>({});
   const pendingKeysRef = useRef(new Set<string>());
   const completingRef = useRef(new Set<string>());
+  const blockedSlotIdsRef = useRef(new Set<string>());
   const readyRef = useRef(isReady);
   const readOnlyRef = useRef(isReadOnly);
 
@@ -104,13 +105,23 @@ export function usePersistedWorkoutSets(
     });
   }, []);
 
+  const setBlockedSlotIds = useCallback((slotIds: readonly string[]) => {
+    blockedSlotIdsRef.current = new Set(slotIds);
+  }, []);
+
   const persistKey = useCallback(
     async (targetSessionId: string, key: string) => {
-      const [exerciseId, setNumberValue] = key.split(':');
-      const setNumber = Number(setNumberValue);
+      const parsed = parseSetKey(key);
       const values = inputsRef.current[key] ?? emptyInputs();
 
-      if (!exerciseId || !Number.isInteger(setNumber)) {
+      if (!parsed) {
+        return;
+      }
+
+      const { slotId, exerciseId, setNumber } = parsed;
+
+      if (blockedSlotIdsRef.current.has(slotId)) {
+        setFieldError(key, DUPLICATE_SLOT_MESSAGE);
         return;
       }
 
@@ -221,8 +232,13 @@ export function usePersistedWorkoutSets(
   );
 
   const completeSet = useCallback(
-    async (exerciseId: string, setNumber: number): Promise<CompleteResult> => {
-      const key = setKey(exerciseId, setNumber);
+    async (slotId: string, exerciseId: string, setNumber: number): Promise<CompleteResult> => {
+      const key = setKey(slotId, exerciseId, setNumber);
+
+      if (blockedSlotIdsRef.current.has(slotId)) {
+        setFieldError(key, DUPLICATE_SLOT_MESSAGE);
+        return { ok: false };
+      }
 
       if (!sessionId || !readyRef.current || readOnlyRef.current || completedRef.current.has(key)) {
         return { ok: false };
@@ -358,5 +374,6 @@ export function usePersistedWorkoutSets(
     completeSet,
     flushAll,
     applySets,
+    setBlockedSlotIds,
   };
 }

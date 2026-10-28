@@ -5,7 +5,7 @@ const IS_DEV = process.env.APP_VARIANT === 'development';
 const config: ExpoConfig = {
   name: IS_DEV ? 'Workout Tracker Dev' : 'Workout Tracker',
   slug: 'workout-tracker',
-  version: '1.0.0',
+  version: '1.1.0',
   orientation: 'portrait',
   icon: './assets/images/icon.png',
   scheme: IS_DEV ? 'workouttracker-dev' : 'workouttracker',

@@ -20,6 +20,7 @@ import { WarmupModal } from '@/components/warmup-modal';
 import { Colors } from '@/constants/theme';
 import { usePersistedWorkoutSets } from '@/hooks/use-persisted-workout-sets';
 import { useRestTimer } from '@/hooks/use-rest-timer';
+import { duplicateExerciseSlotIds } from '@/lib/exercise-swap';
 import { buildWorkoutProgressions } from '@/lib/progression';
 import { parsePositiveWeight } from '@/lib/warmup';
 import {
@@ -68,8 +69,31 @@ export default function ActiveWorkoutScreen() {
   const startRestTimer = restTimer.start;
   const isReady = Boolean(sessionId) && loadedSessionId === sessionId && !errorMessage;
   const persisted = usePersistedWorkoutSets(sessionId, initialSets, isFinished, isReady);
-  const { inputs, completedSets, setErrors, updateInput, completeSet, flushAll, applySets } =
-    persisted;
+  const {
+    inputs,
+    completedSets,
+    setErrors,
+    updateInput,
+    completeSet,
+    flushAll,
+    applySets,
+    setBlockedSlotIds,
+  } = persisted;
+  const blockedSlotIds = useMemo(
+    () =>
+      duplicateExerciseSlotIds(
+        exercises.flatMap((item) => {
+          const exerciseId = item.exercise?.id ? String(item.exercise.id) : '';
+
+          if (!exerciseId || String(item.id).endsWith(':logged')) {
+            return [];
+          }
+
+          return [{ slotId: String(item.programExerciseId || item.id), exerciseId }];
+        }),
+      ),
+    [exercises],
+  );
   const [pickerItem, setPickerItem] = useState<ProgramExercise | null>(null);
   const [pickerExercises, setPickerExercises] = useState<WorkoutExercise[]>([]);
   const [pickerLoading, setPickerLoading] = useState(false);
@@ -101,6 +125,10 @@ export default function ActiveWorkoutScreen() {
       return new Map();
     }
   }, [exercises, previousPerformance]);
+
+  useEffect(() => {
+    setBlockedSlotIds(blockedSlotIds);
+  }, [blockedSlotIds, setBlockedSlotIds]);
 
   useEffect(() => {
     console.log('[WorkoutScreen] mounted', { sessionId });
@@ -217,10 +245,14 @@ export default function ActiveWorkoutScreen() {
     };
   }, [sessionId]);
 
-  function getEnteredWorkingWeight(exerciseId: string, setCount: number): number | null {
+  function getEnteredWorkingWeight(
+    slotId: string,
+    exerciseId: string,
+    setCount: number,
+  ): number | null {
     for (let setNumber = 1; setNumber <= setCount; setNumber += 1) {
       const weight = parsePositiveWeight(
-        inputs[setKey(exerciseId, setNumber)]?.weight ?? '',
+        inputs[setKey(slotId, exerciseId, setNumber)]?.weight ?? '',
       );
 
       if (weight !== null) {
@@ -231,8 +263,8 @@ export default function ActiveWorkoutScreen() {
     return null;
   }
 
-  async function handleCompleteSet(exerciseId: string, setNumber: number) {
-    const result = await completeSet(exerciseId, setNumber);
+  async function handleCompleteSet(slotId: string, exerciseId: string, setNumber: number) {
+    const result = await completeSet(slotId, exerciseId, setNumber);
 
     if (result.ok) {
       startRestTimer();
@@ -260,9 +292,9 @@ export default function ActiveWorkoutScreen() {
     router.dismissTo('/');
   }
 
-  function hasCompletedSets(exerciseId: string, setCount: number): boolean {
+  function hasCompletedSets(slotId: string, exerciseId: string, setCount: number): boolean {
     for (let setNumber = 1; setNumber <= setCount; setNumber += 1) {
-      if (completedSets[setKey(exerciseId, setNumber)]) {
+      if (completedSets[setKey(slotId, exerciseId, setNumber)]) {
         return true;
       }
     }
@@ -274,7 +306,7 @@ export default function ActiveWorkoutScreen() {
     const exerciseId = item.exercise?.id ? String(item.exercise.id) : null;
     const programExerciseId = String(item.programExerciseId || item.id);
 
-    if (!exerciseId || programExerciseId.startsWith('session:') || isFinished || isSwapping) {
+    if (!exerciseId || String(item.id).endsWith(':logged') || isFinished || isSwapping) {
       return;
     }
 
@@ -291,11 +323,11 @@ export default function ActiveWorkoutScreen() {
         return;
       }
 
-      setPickerExercises(result.data.filter((exercise) => exercise.id !== exerciseId));
+      setPickerExercises(result.data);
       setPickerLoading(false);
     };
 
-    if (hasCompletedSets(exerciseId, Number(item.targetSets) || 0)) {
+    if (hasCompletedSets(programExerciseId, exerciseId, Number(item.targetSets) || 0)) {
       Alert.alert(
         'You already logged sets for this exercise.',
         'Keep completed sets and switch remaining sets?',
@@ -323,6 +355,7 @@ export default function ActiveWorkoutScreen() {
     const fromExerciseId = String(pickerItem.exercise.id);
     const programExerciseId = String(pickerItem.programExerciseId || pickerItem.id);
     const keepCompletedSets = hasCompletedSets(
+      programExerciseId,
       fromExerciseId,
       Number(pickerItem.targetSets) || 0,
     );
@@ -341,6 +374,7 @@ export default function ActiveWorkoutScreen() {
     });
 
     if (!result.ok) {
+      setPickerError(result.error);
       setSwapError(result.error);
       setIsSwapping(false);
       return;
@@ -425,9 +459,13 @@ export default function ActiveWorkoutScreen() {
         ) : (
           exercises.map((item) => {
             const exerciseId = item.exercise?.id ? String(item.exercise.id) : undefined;
+            const slotId = String(item.programExerciseId || item.id);
             const notes = item.notes?.trim();
             const setCount = Number(item.targetSets) || 0;
             const progression = exerciseId ? progressions.get(exerciseId) : undefined;
+            const canSwap =
+              Boolean(exerciseId) && !isFinished && !String(item.id).endsWith(':logged');
+            const slotBlocked = blockedSlotIds.includes(slotId);
 
             return (
               <Card key={item.id} style={styles.exerciseCard}>
@@ -448,20 +486,21 @@ export default function ActiveWorkoutScreen() {
                         <Text style={styles.warmupButtonLabel}>Warm Up</Text>
                       </Pressable>
                     ) : null}
-                    {!isFinished &&
-                    !String(item.id).endsWith(':logged') &&
-                    !String(item.programExerciseId || item.id).startsWith('session:') ? (
+                    {canSwap ? (
                       <Pressable
                         accessibilityRole="button"
-                        accessibilityLabel={`Exercise menu for ${item.exercise?.name ?? 'exercise'}`}
+                        accessibilityLabel={`Swap exercise ${item.exercise?.name ?? 'exercise'}`}
+                        disabled={isSwapping}
                         onPress={() => {
                           void openExercisePicker(item);
                         }}
                         style={({ pressed }) => [
-                          styles.menuButton,
-                          pressed && styles.pressed,
+                          styles.warmupButton,
+                          (pressed || isSwapping) && styles.pressed,
                         ]}>
-                        <Text style={styles.menuButtonLabel}>···</Text>
+                        <Text style={styles.warmupButtonLabel}>
+                          {isSwapping && pickerItem?.id === item.id ? 'Swapping...' : 'Swap Exercise'}
+                        </Text>
                       </Pressable>
                     ) : null}
                   </View>
@@ -475,12 +514,17 @@ export default function ActiveWorkoutScreen() {
                     : `${setCount} sets`}
                 </Text>
                 {notes ? <Text style={styles.exerciseMeta}>{notes}</Text> : null}
+                {slotBlocked ? (
+                  <Text style={styles.exerciseMeta}>
+                    This exercise also appears in another slot. Sets here stay separate and are not saved over the other slot.
+                  </Text>
+                ) : null}
                 {progression ? <ExerciseProgressionBlock progression={progression} /> : null}
 
                 {exerciseId
                   ? Array.from({ length: setCount }, (_, index) => {
                       const setNumber = index + 1;
-                      const key = setKey(exerciseId, setNumber);
+                      const key = setKey(slotId, exerciseId, setNumber);
                       const isCompleted = Boolean(completedSets[key]);
                       const values = inputs[key] ?? { weight: '', reps: '', rir: '' };
                       const inputsDisabled = isCompleted || isFinished;
@@ -537,7 +581,7 @@ export default function ActiveWorkoutScreen() {
                               }
                               disabled={isCompleted || isFinished}
                               onPress={() => {
-                                void handleCompleteSet(exerciseId, setNumber);
+                                void handleCompleteSet(slotId, exerciseId, setNumber);
                               }}
                               style={({ pressed }) => [
                                 styles.completeButton,
@@ -608,16 +652,25 @@ export default function ActiveWorkoutScreen() {
         weightIncrement={warmupExercise?.weightIncrement ?? null}
         initialWorkingWeight={
           warmupExercise
-            ? getEnteredWorkingWeight(warmupExercise.id, warmupItem?.targetSets ?? 0)
+            ? getEnteredWorkingWeight(
+                String(warmupItem?.programExerciseId || warmupItem?.id || warmupExercise.id),
+                warmupExercise.id,
+                warmupItem?.targetSets ?? 0,
+              )
             : null
         }
         onClose={() => setWarmupExerciseId(null)}
       />
       <ExercisePickerSheet
         visible={pickerItem !== null}
+        currentExerciseId={pickerItem?.exercise?.id ? String(pickerItem.exercise.id) : ''}
         currentName={pickerItem?.exercise?.name ?? 'this exercise'}
+        currentCategory={pickerItem?.exercise?.category ?? ''}
+        currentEquipmentType={pickerItem?.exercise?.equipmentType ?? null}
+        canReplaceInProgram={/^\d+$/.test(String(pickerItem?.programExerciseId ?? ''))}
         exercises={pickerExercises}
-        isLoading={pickerLoading || isSwapping}
+        isLoading={pickerLoading}
+        isSubmitting={isSwapping}
         errorMessage={pickerError}
         onClose={() => {
           if (!isSwapping) {
@@ -699,22 +752,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 0.4,
     textTransform: 'uppercase',
-  },
-  menuButton: {
-    minHeight: 32,
-    minWidth: 32,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: palette.border,
-    paddingHorizontal: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  menuButtonLabel: {
-    color: palette.text,
-    fontSize: 16,
-    fontWeight: '800',
-    letterSpacing: 1,
   },
   exerciseMeta: {
     color: palette.muted,

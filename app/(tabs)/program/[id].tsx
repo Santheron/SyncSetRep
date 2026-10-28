@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { StyleSheet, Text } from 'react-native';
-import { Stack, useLocalSearchParams } from 'expo-router';
+import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
@@ -59,7 +59,8 @@ export default function ProgramDayScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  useEffect(() => {
+  useFocusEffect(
+    useCallback(() => {
     if (!programDayId) {
       setIsLoading(false);
       setErrorMessage('Missing program day.');
@@ -175,7 +176,7 @@ export default function ProgramDayScreen() {
     return () => {
       isMounted = false;
     };
-  }, [programDayId]);
+  }, [programDayId]));
 
   return (
     <Screen>

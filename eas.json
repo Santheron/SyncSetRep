@@ -24,6 +24,10 @@
       }
     },
     "production": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
       "autoIncrement": true,
       "env": {
         "APP_VARIANT": "production"

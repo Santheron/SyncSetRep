@@ -1,6 +1,8 @@
 import * as QueryParams from 'expo-auth-session/build/QueryParams';
-import type { EmailOtpType, Session } from '@supabase/supabase-js';
+import type { Session } from '@supabase/supabase-js';
 
+import { otpTypeForTokenHash } from '@/lib/auth-signup';
+import { hasPasswordResetPending } from '@/lib/password-recovery';
 import { hasPkceVerifier, listPkceStorageKeys } from '@/lib/supabase-auth-storage';
 import { supabase } from '@/lib/supabase';
 
@@ -18,24 +20,7 @@ type CallbackParams = {
   errorCode?: string;
 };
 
-const OTP_TYPES: EmailOtpType[] = [
-  'signup',
-  'invite',
-  'magiclink',
-  'recovery',
-  'email_change',
-  'email',
-];
-
 const exchangeByCode = new Map<string, Promise<Result>>();
-
-function asOtpType(value: string | undefined): EmailOtpType | null {
-  if (!value) {
-    return null;
-  }
-
-  return OTP_TYPES.includes(value as EmailOtpType) ? (value as EmailOtpType) : null;
-}
 
 function firstParam(
   params: Record<string, string>,
@@ -228,7 +213,8 @@ export async function createSessionFromUrl(url: string): Promise<Result> {
   }
 
   if (params.token_hash) {
-    const type = asOtpType(params.type) ?? 'recovery';
+    const pendingReset = await hasPasswordResetPending();
+    const type = otpTypeForTokenHash(params.type, pendingReset);
     const { data, error } = await supabase.auth.verifyOtp({
       token_hash: params.token_hash,
       type,

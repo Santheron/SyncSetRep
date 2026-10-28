@@ -1,8 +1,21 @@
 import { getAuthenticatedUserId } from '@/lib/current-user';
+import {
+  assignLoggedSets,
+  DUPLICATE_SLOT_MESSAGE,
+  planReplacementSets,
+  weightForReplacement,
+} from '@/lib/exercise-swap';
 import { getExerciseProgression } from '@/lib/progression';
 import { assertOwnProgramDay, ensureOwnProgram } from '@/lib/programs';
 import { logOwnedDataError } from '@/lib/rls-error';
 import { supabase } from '@/lib/supabase';
+import { formatWorkoutActionError } from '@/lib/workout-action-errors';
+import {
+  createAsyncLock,
+  partitionUnfinishedSessions,
+  selectUnfinishedDeleteIds,
+  sortUnfinishedSessions,
+} from '@/lib/workout-day-selection';
 import { unwrapRelation } from '@/lib/workout-format';
 
 export type ProgramDayOption = {
@@ -48,6 +61,7 @@ export type ExerciseSwapScope = 'session' | 'program';
 
 export type WorkoutSetRecord = {
   id: string;
+  slotId?: string;
   exerciseId: string;
   setNumber: number;
   weight: number | null;
@@ -234,18 +248,6 @@ function toSetRecord(row: WorkoutSetRow): WorkoutSetRecord {
     rir: toFiniteNumber(row.rir),
     isCompleted: Boolean(row.is_completed),
   };
-}
-
-function pickSetRecord(
-  rows: WorkoutSetRecord[],
-  exerciseId: string,
-  setNumber: number,
-): WorkoutSetRecord | undefined {
-  const matches = rows.filter(
-    (row) => row.exerciseId === exerciseId && row.setNumber === setNumber,
-  );
-
-  return matches.find((row) => row.isCompleted) ?? matches[0];
 }
 
 async function fetchProgramExercises(programDayId: string): Promise<Result<ProgramExercise[]>> {
@@ -625,6 +627,17 @@ function formatSupabaseError(error: {
     .join(' | ');
 }
 
+function setSaveError(
+  error: { code?: string | null; message?: string | null } | null | undefined,
+  fallback: string,
+): string {
+  return formatWorkoutActionError({
+    action: 'save-set',
+    code: error?.code,
+    message: error?.message ?? fallback,
+  });
+}
+
 function errorMessage(error: unknown, fallback: string): string {
   if (error && typeof error === 'object' && 'message' in error) {
     const message = (error as { message?: unknown }).message;
@@ -923,8 +936,12 @@ function recommendedStartWeight(
   }
 }
 
-async function deleteSessionsAndSets(sessionIds: string[]): Promise<Result<true>> {
-  if (sessionIds.length === 0) {
+async function deleteOwnedUnfinishedSessions(sessionIds: string[]): Promise<Result<true>> {
+  const uniqueIds = [...new Set(sessionIds.map((sessionId) => String(sessionId).trim()))].filter(
+    Boolean,
+  );
+
+  if (uniqueIds.length === 0) {
     return { ok: true, data: true };
   }
 
@@ -934,10 +951,32 @@ async function deleteSessionsAndSets(sessionIds: string[]): Promise<Result<true>
     return userResult;
   }
 
+  const { data: ownedRows, error: ownedError } = await supabase
+    .from('workout_sessions')
+    .select('id')
+    .in('id', uniqueIds)
+    .eq('user_id', userResult.data)
+    .is('finished_at', null);
+
+  if (ownedError) {
+    return { ok: false, error: ownedError.message };
+  }
+
+  const ownedIds = (ownedRows ?? []).map((row) => String(row.id));
+  const selected = selectUnfinishedDeleteIds(uniqueIds, ownedIds);
+
+  if (!selected.ok) {
+    return selected;
+  }
+
+  if (selected.ids.length === 0) {
+    return { ok: true, data: true };
+  }
+
   const { error: setsError } = await supabase
     .from('workout_sets')
     .delete()
-    .in('workout_session_id', sessionIds);
+    .in('workout_session_id', selected.ids);
 
   if (setsError) {
     return { ok: false, error: setsError.message };
@@ -946,7 +985,7 @@ async function deleteSessionsAndSets(sessionIds: string[]): Promise<Result<true>
   const { error: sessionsError } = await supabase
     .from('workout_sessions')
     .delete()
-    .in('id', sessionIds)
+    .in('id', selected.ids)
     .eq('user_id', userResult.data)
     .is('finished_at', null);
 
@@ -1025,69 +1064,151 @@ export async function listUnfinishedSessions(): Promise<Result<UnfinishedSession
     )
     .eq('user_id', userResult.data)
     .is('finished_at', null)
-    .order('started_at', { ascending: false });
+    .order('started_at', { ascending: false })
+    .order('id', { ascending: false });
 
   if (error) {
     return { ok: false, error: error.message };
   }
 
-  const sessions = ((data ?? []) as SessionRow[]).map((row) => {
-    const programDay = unwrapRelation(row.program_day);
+  const sessions = sortUnfinishedSessions(
+    ((data ?? []) as SessionRow[]).map((row) => {
+      const programDay = unwrapRelation(row.program_day);
 
-    return {
-      id: String(row.id),
-      programDayId: String(row.program_day_id),
-      startedAt: row.started_at,
-      name: programDay?.name ?? 'Workout',
-      subtitle: programDay?.subtitle ?? '',
-    };
-  });
+      return {
+        id: String(row.id),
+        programDayId: String(row.program_day_id),
+        startedAt: row.started_at,
+        name: programDay?.name ?? 'Workout',
+        subtitle: programDay?.subtitle ?? '',
+      };
+    }),
+  );
 
   return { ok: true, data: sessions };
 }
 
-export async function getLatestUnfinishedSession(): Promise<Result<UnfinishedSession | null>> {
-  const result = await listUnfinishedSessions();
+export async function discardUnfinishedSession(sessionId: string): Promise<Result<true>> {
+  const id = String(sessionId ?? '').trim();
 
-  if (!result.ok) {
-    return result;
+  if (!id) {
+    return { ok: false, error: 'Missing workout session.' };
   }
 
-  return { ok: true, data: result.data[0] ?? null };
-}
+  const removed = await deleteOwnedUnfinishedSessions([id]);
 
-export async function discardUnfinishedSessions(): Promise<Result<true>> {
-  const result = await listUnfinishedSessions();
-
-  if (!result.ok) {
-    return result;
+  if (!removed.ok) {
+    return {
+      ok: false,
+      error: formatWorkoutActionError({ action: 'discard', message: removed.error }),
+    };
   }
 
-  return deleteSessionsAndSets(result.data.map((session) => session.id));
+  return removed;
 }
 
-export async function startWorkoutForDay(programDayId: string): Promise<Result<{ sessionId: string }>> {
+export type WorkoutDayStartBlock = {
+  reason: 'same-day' | 'other-days';
+  sameDay: UnfinishedSession[];
+  otherDays: UnfinishedSession[];
+};
+
+export type StartWorkoutForDayResult =
+  | { ok: true; data: { sessionId: string } }
+  | { ok: false; error: string; block?: WorkoutDayStartBlock };
+
+function blockedStartResult(block: WorkoutDayStartBlock): StartWorkoutForDayResult {
+  if (block.reason === 'same-day') {
+    return {
+      ok: false,
+      error:
+        'This day already has an unfinished workout. Resume it, or discard that session before starting another.',
+      block,
+    };
+  }
+
+  return {
+    ok: false,
+    error: 'Other unfinished workouts are still open. Choose one before starting this day.',
+    block,
+  };
+}
+
+async function findWorkoutStartBlock(
+  programDayId: string,
+  acknowledgeOtherUnfinished: boolean,
+): Promise<Result<WorkoutDayStartBlock | null>> {
+  const unfinishedResult = await listUnfinishedSessions();
+
+  if (!unfinishedResult.ok) {
+    return unfinishedResult;
+  }
+
+  const partition = partitionUnfinishedSessions(unfinishedResult.data, programDayId);
+
+  if (partition.sameDay.length > 0) {
+    return {
+      ok: true,
+      data: {
+        reason: 'same-day',
+        sameDay: partition.sameDay,
+        otherDays: partition.otherDays,
+      },
+    };
+  }
+
+  if (partition.otherDays.length > 0 && !acknowledgeOtherUnfinished) {
+    return {
+      ok: true,
+      data: {
+        reason: 'other-days',
+        sameDay: partition.sameDay,
+        otherDays: partition.otherDays,
+      },
+    };
+  }
+
+  return { ok: true, data: null };
+}
+
+const runExclusiveWorkoutStart = createAsyncLock();
+
+async function startWorkoutForDayUnlocked(
+  programDayId: string,
+  options?: { acknowledgeOtherUnfinished?: boolean },
+): Promise<StartWorkoutForDayResult> {
   try {
-    const unfinishedResult = await listUnfinishedSessions();
+    const requestedDayId = String(programDayId ?? '').trim();
 
-    if (!unfinishedResult.ok) {
-      return unfinishedResult;
+    if (!requestedDayId) {
+      return { ok: false, error: 'Missing workout day.' };
     }
 
-    if (unfinishedResult.data.length > 0) {
-      const existing = unfinishedResult.data[0];
-      console.log('[WorkoutStart] reusing unfinished session');
-      return { ok: true, data: { sessionId: String(existing.id) } };
-    }
-
-    const ownedDay = await assertOwnProgramDay(programDayId);
+    const ownedDay = await assertOwnProgramDay(requestedDayId);
 
     if (!ownedDay.ok) {
       console.log('[WorkoutStart] program day not owned by current user');
       return ownedDay;
     }
 
-    const exercisesResult = await fetchProgramExercises(programDayId);
+    const acknowledgeOtherUnfinished = Boolean(options?.acknowledgeOtherUnfinished);
+    const initialBlock = await findWorkoutStartBlock(requestedDayId, acknowledgeOtherUnfinished);
+
+    if (!initialBlock.ok) {
+      return initialBlock;
+    }
+
+    if (initialBlock.data) {
+      console.log('[WorkoutStart] blocked', {
+        reason: initialBlock.data.reason,
+        programDayId: requestedDayId,
+        sameDayCount: initialBlock.data.sameDay.length,
+        otherDayCount: initialBlock.data.otherDays.length,
+      });
+      return blockedStartResult(initialBlock.data);
+    }
+
+    const exercisesResult = await fetchProgramExercises(requestedDayId);
 
     if (!exercisesResult.ok) {
       return { ok: false, error: exercisesResult.error };
@@ -1098,16 +1219,32 @@ export async function startWorkoutForDay(programDayId: string): Promise<Result<{
     console.log('[WorkoutStart] authenticated user present:', userResult.ok);
     console.log('[WorkoutStart] session user_id present:', userResult.ok);
     console.log('[WorkoutStart] program id:', ownedDay.data.programId);
-    console.log('[WorkoutStart] program day id:', programDayId);
+    console.log('[WorkoutStart] program day id:', requestedDayId);
 
     if (!userResult.ok) {
       console.log('[WorkoutStart] session insert success/error: error (not signed in)');
       return userResult;
     }
 
+    const insertBlock = await findWorkoutStartBlock(requestedDayId, acknowledgeOtherUnfinished);
+
+    if (!insertBlock.ok) {
+      return insertBlock;
+    }
+
+    if (insertBlock.data) {
+      console.log('[WorkoutStart] blocked before insert', {
+        reason: insertBlock.data.reason,
+        programDayId: requestedDayId,
+        sameDayCount: insertBlock.data.sameDay.length,
+        otherDayCount: insertBlock.data.otherDays.length,
+      });
+      return blockedStartResult(insertBlock.data);
+    }
+
     const sessionInsert = {
       user_id: userResult.data,
-      program_day_id: programDayId,
+      program_day_id: requestedDayId,
       started_at: new Date().toISOString(),
     };
 
@@ -1126,7 +1263,14 @@ export async function startWorkoutForDay(programDayId: string): Promise<Result<{
       });
       console.log('[WorkoutStart] session insert success/error: error');
       console.log('[WorkoutStart] session insert keys:', Object.keys(sessionInsert).join(','));
-      return { ok: false, error: sessionError?.message ?? 'Could not start workout.' };
+      return {
+        ok: false,
+        error: formatWorkoutActionError({
+          action: 'start',
+          code: sessionError?.code,
+          message: sessionError?.message ?? 'Could not start workout.',
+        }),
+      };
     }
 
     console.log('[WorkoutStart] session insert success/error: success');
@@ -1185,8 +1329,27 @@ export async function startWorkoutForDay(programDayId: string): Promise<Result<{
           userId: userResult.data,
           error: setsError,
         });
-        await deleteSessionsAndSets([session.id]);
-        return { ok: false, error: setsError.message };
+        const removed = await deleteOwnedUnfinishedSessions([String(session.id)]);
+
+        if (!removed.ok) {
+          return {
+            ok: false,
+            error: formatWorkoutActionError({
+              action: 'start',
+              message:
+                'The workout sets were not saved, and the unfinished session could not be removed. Completed workouts were not deleted.',
+            }),
+          };
+        }
+
+        return {
+          ok: false,
+          error: formatWorkoutActionError({
+            action: 'start',
+            message:
+              'The workout could not be started because its sets were not saved. The empty session was removed. Completed workouts were not deleted.',
+          }),
+        };
       }
     }
 
@@ -1195,9 +1358,19 @@ export async function startWorkoutForDay(programDayId: string): Promise<Result<{
     console.error('[WorkoutStart CRASH]', error);
     return {
       ok: false,
-      error: errorMessage(error, 'Could not start workout.'),
+      error: formatWorkoutActionError({
+        action: 'start',
+        message: errorMessage(error, 'Could not start workout.'),
+      }),
     };
   }
+}
+
+export async function startWorkoutForDay(
+  programDayId: string,
+  options?: { acknowledgeOtherUnfinished?: boolean },
+): Promise<StartWorkoutForDayResult> {
+  return runExclusiveWorkoutStart(() => startWorkoutForDayUnlocked(programDayId, options));
 }
 
 export async function loadActiveWorkout(sessionId: string): Promise<Result<ActiveWorkout>> {
@@ -1234,24 +1407,23 @@ export async function loadActiveWorkout(sessionId: string): Promise<Result<Activ
   }
 
   const setRows = setsResult.data;
-  const sets: WorkoutSetRecord[] = [];
-
-  for (const item of exercisesResult.data) {
+  const slots = exercisesResult.data.flatMap((item) => {
     const exerciseId = item.exercise?.id ? String(item.exercise.id) : null;
     const targetSets = toFiniteNumber(item.targetSets) ?? 0;
 
     if (!exerciseId) {
-      continue;
+      return [];
     }
 
-    for (let setNumber = 1; setNumber <= targetSets; setNumber += 1) {
-      const row = pickSetRecord(setRows, exerciseId, setNumber);
-
-      if (row) {
-        sets.push(row);
-      }
-    }
-  }
+    return [
+      {
+        slotId: String(item.programExerciseId || item.id),
+        exerciseId,
+        targetSets,
+      },
+    ];
+  });
+  const sets = assignLoggedSets(slots, setRows);
 
   return {
     ok: true,
@@ -1373,76 +1545,111 @@ async function replaceIncompleteSets(input: {
     return setsResult;
   }
 
-  const fromSets = setsResult.data.filter(
-    (row) => row.exerciseId === input.fromExerciseId,
-  );
-  const completed = fromSets.filter((row) => row.isCompleted);
-  const incomplete = fromSets.filter((row) => !row.isCompleted);
-  const existingReplacement = setsResult.data.filter(
-    (row) => row.exerciseId === input.toExercise.id,
-  );
-
-  if (existingReplacement.length > 0 && completed.length === 0) {
-    return {
-      ok: false,
-      error: 'That exercise is already in this workout.',
-    };
-  }
-
-  if (completed.length > 0 && !input.keepCompleted) {
-    return {
-      ok: false,
-      error: 'You already logged sets for this exercise.',
-    };
-  }
-
-  if (incomplete.length > 0) {
-    const { error: deleteError } = await supabase
-      .from('workout_sets')
-      .delete()
-      .eq('workout_session_id', input.sessionId)
-      .eq('exercise_id', input.fromExerciseId)
-      .eq('is_completed', false);
-
-    if (deleteError) {
-      return { ok: false, error: deleteError.message };
+  const sourceDraftWeight = setsResult.data.reduce<number | null>((highest, row) => {
+    if (row.exerciseId !== input.fromExerciseId || row.isCompleted || row.weight === null) {
+      return highest;
     }
-  }
 
-  const remainingCount =
-    completed.length > 0
-      ? Math.max(input.programItem.targetSets - completed.length, incomplete.length, 0)
-      : Math.max(input.programItem.targetSets, incomplete.length, 1);
-
-  if (remainingCount < 1) {
-    return { ok: true, data: true };
-  }
-
-  const recommendedWeight = recommendedStartWeight(
+    return highest === null || row.weight > highest ? row.weight : highest;
+  }, null);
+  const historyWeight = recommendedStartWeight(
     {
       ...input.programItem,
       exercise: input.toExercise,
     },
     input.previousSets,
   );
+  const weight = weightForReplacement({
+    sourceEquipmentType: input.programItem.exercise?.equipmentType,
+    targetEquipmentType: input.toExercise.equipmentType,
+    sourceDraftWeight,
+    targetHistoryWeight: historyWeight,
+  });
+  const plan = planReplacementSets({
+    fromExerciseId: input.fromExerciseId,
+    toExerciseId: input.toExercise.id,
+    targetSets: input.programItem.targetSets,
+    sets: setsResult.data,
+    keepCompleted: input.keepCompleted,
+    weight,
+  });
 
-  const rows = Array.from({ length: remainingCount }, (_, index) => ({
-    workout_session_id: input.sessionId,
-    exercise_id: input.toExercise.id,
-    set_number: index + 1,
-    weight: recommendedWeight,
-    reps: null,
-    rir: null,
-    is_completed: false,
-  }));
-
-  const { error: insertError } = await supabase.from('workout_sets').insert(rows);
-
-  if (insertError) {
-    return { ok: false, error: insertError.message };
+  if (!plan.ok) {
+    return plan;
   }
 
-  return { ok: true, data: true };
+  let insertedIds: string[] = [];
+
+  if (plan.insertCount > 0) {
+    const rows = Array.from({ length: plan.insertCount }, (_, index) => ({
+      workout_session_id: input.sessionId,
+      exercise_id: input.toExercise.id,
+      set_number: index + 1,
+      weight: plan.weight,
+      reps: null,
+      rir: null,
+      is_completed: false,
+    }));
+    const { data: inserted, error: insertError } = await supabase
+      .from('workout_sets')
+      .insert(rows)
+      .select('id');
+
+    if (insertError || !inserted || inserted.length !== rows.length) {
+      const partialIds = (inserted ?? []).map((row) => String(row.id)).filter(Boolean);
+
+      if (partialIds.length > 0) {
+        await supabase.from('workout_sets').delete().in('id', partialIds);
+      }
+
+      return {
+        ok: false,
+        error: formatWorkoutActionError({
+          action: 'save-set',
+          code: insertError?.code,
+          message:
+            insertError?.message ??
+            'The replacement was not saved, so your sets were left unchanged.',
+        }),
+      };
+    }
+
+    insertedIds = inserted.map((row) => String(row.id));
+  }
+
+  if (plan.deleteIds.length === 0) {
+    return { ok: true, data: true };
+  }
+
+  const { error: deleteError } = await supabase
+    .from('workout_sets')
+    .delete()
+    .in('id', plan.deleteIds)
+    .eq('workout_session_id', input.sessionId)
+    .eq('exercise_id', input.fromExerciseId)
+    .eq('is_completed', false);
+
+  if (!deleteError) {
+    return { ok: true, data: true };
+  }
+
+  if (insertedIds.length > 0) {
+    const { error: rollbackError } = await supabase.from('workout_sets').delete().in('id', insertedIds);
+
+    if (rollbackError) {
+      return {
+        ok: false,
+        error:
+          'The replacement could not be finished. Refresh this workout before logging more sets. Completed sets were not deleted.',
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    error:
+      'The replacement could not be finished. Your completed and incomplete sets are still saved.',
+  };
 }
 
 export async function swapWorkoutExercise(input: {
@@ -1475,6 +1682,15 @@ export async function swapWorkoutExercise(input: {
 
   if (!programItem?.exercise) {
     return { ok: false, error: 'Could not find that exercise in this workout.' };
+  }
+
+  const sameExerciseSlots = workoutResult.data.exercises.filter(
+    (item) =>
+      String(item.exercise?.id) === fromExerciseId && !String(item.id).endsWith(':logged'),
+  );
+
+  if (sameExerciseSlots.length > 1) {
+    return { ok: false, error: DUPLICATE_SLOT_MESSAGE };
   }
 
   const replacementResult = await fetchWorkoutExercisesByIds([toExerciseId]);
@@ -1623,7 +1839,7 @@ export async function saveWorkoutSet(
       error_code: existingError.code,
       error_message: existingError.message,
     });
-    return { ok: false, error: existingError.message };
+    return { ok: false, error: setSaveError(existingError, 'This set was not saved.') };
   }
 
   if ((existingRows?.length ?? 0) > 1) {
@@ -1649,7 +1865,7 @@ export async function saveWorkoutSet(
         error_code: existingByIdError.code,
         error_message: existingByIdError.message,
       });
-      return { ok: false, error: existingByIdError.message };
+      return { ok: false, error: setSaveError(existingByIdError, 'This set was not saved.') };
     }
 
     existingId = existingById?.id ? String(existingById.id) : null;
@@ -1680,14 +1896,17 @@ export async function saveWorkoutSet(
         error_code: error.code,
         error_message: error.message,
       });
-      return { ok: false, error: error.message };
+      return { ok: false, error: setSaveError(error, 'This set was not saved.') };
     }
 
     if (!data) {
       logSaveWorkoutSet('UPDATE matched zero rows', { ...logBase, existingId });
       return {
         ok: false,
-        error: 'Could not update this set because no matching workout_set row was found.',
+        error: setSaveError(
+          null,
+          'Could not update this set because no matching workout_set row was found.',
+        ),
       };
     }
 
@@ -1732,13 +1951,13 @@ export async function saveWorkoutSet(
           error_code: conflictError.code,
           error_message: conflictError.message,
         });
-        return { ok: false, error: conflictError.message };
+        return { ok: false, error: setSaveError(conflictError, 'This set was not saved.') };
       }
 
       const conflictId = conflictRows?.[0]?.id ? String(conflictRows[0].id) : null;
 
       if (!conflictId) {
-        return { ok: false, error: error.message };
+        return { ok: false, error: setSaveError(error, 'This set was not saved.') };
       }
 
       logSaveWorkoutSet('INSERT unique conflict; performing UPDATE', {
@@ -1763,13 +1982,16 @@ export async function saveWorkoutSet(
           error_code: updateError.code,
           error_message: updateError.message,
         });
-        return { ok: false, error: updateError.message };
+        return { ok: false, error: setSaveError(updateError, 'This set was not saved.') };
       }
 
       if (!updated) {
         return {
           ok: false,
-          error: 'Could not update this set because no matching workout_set row was found.',
+          error: setSaveError(
+            null,
+            'Could not update this set because no matching workout_set row was found.',
+          ),
         };
       }
 
@@ -1781,14 +2003,17 @@ export async function saveWorkoutSet(
       return { ok: true, data: { id: String(updated.id) } };
     }
 
-    return { ok: false, error: error.message };
+    return { ok: false, error: setSaveError(error, 'This set was not saved.') };
   }
 
   if (!data) {
     logSaveWorkoutSet('INSERT returned no row', logBase);
     return {
       ok: false,
-      error: 'Could not save this set because insert did not return a workout_set row.',
+      error: setSaveError(
+        null,
+        'Could not save this set because insert did not return a workout_set row.',
+      ),
     };
   }
 
@@ -1971,6 +2196,4 @@ export function parseOptionalRir(value: string): { ready: boolean; value: number
   return parseOptionalReps(value);
 }
 
-export function setKey(exerciseId: string, setNumber: number) {
-  return `${exerciseId}:${setNumber}`;
-}
+export { parseSetKey, setKey } from '@/lib/exercise-swap';

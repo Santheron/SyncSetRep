@@ -1,14 +1,18 @@
 import { useCallback, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
-import { Card, Screen } from '@/components/screen';
-import { Colors } from '@/constants/theme';
-import { formatWorkoutDate } from '@/lib/workout-format';
-import { useAuth } from '@/lib/auth-context';
 import {
-  discardUnfinishedSessions,
-  getLatestUnfinishedSession,
+  confirmDiscardUnfinishedSession,
+  UnfinishedSessionCard,
+} from '@/components/unfinished-session-card';
+import { Screen } from '@/components/screen';
+import { Colors } from '@/constants/theme';
+import { useAuth } from '@/lib/auth-context';
+import { workoutNavigationTarget } from '@/lib/workout-day-selection';
+import {
+  discardUnfinishedSession,
+  listUnfinishedSessions,
   type UnfinishedSession,
 } from '@/lib/workout-session';
 
@@ -17,18 +21,24 @@ const palette = Colors.dark;
 export default function WorkoutScreen() {
   const router = useRouter();
   const { user, isLoading: isAuthLoading } = useAuth();
-  const [activeSession, setActiveSession] = useState<UnfinishedSession | null>(null);
+  const [sessions, setSessions] = useState<UnfinishedSession[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [isWorking, setIsWorking] = useState(false);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const loadSessions = useCallback(async () => {
+    const result = await listUnfinishedSessions();
+    return result;
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
       let isMounted = true;
+      setBusyAction(null);
 
       async function load() {
         setIsLoading(true);
-        const result = await getLatestUnfinishedSession();
+        const result = await loadSessions();
 
         if (!isMounted) {
           return;
@@ -36,10 +46,10 @@ export default function WorkoutScreen() {
 
         if (!result.ok) {
           setErrorMessage(result.error);
-          setActiveSession(null);
+          setSessions([]);
         } else {
           setErrorMessage(null);
-          setActiveSession(result.data);
+          setSessions(result.data);
         }
 
         setIsLoading(false);
@@ -50,101 +60,89 @@ export default function WorkoutScreen() {
       return () => {
         isMounted = false;
       };
-    }, []),
+    }, [loadSessions]),
   );
 
-  function openSession(sessionId: string | number) {
+  function followNavigation(action: 'start' | 'resume', sessionId: string | null) {
+    const target = workoutNavigationTarget('home', action, sessionId);
+
+    if (target.stay) {
+      return;
+    }
+
+    if (target.pathname === '/workout/select') {
+      router.push(target.pathname);
+      return;
+    }
+
     router.push({
-      pathname: '/workout/[sessionId]',
-      params: { sessionId: String(sessionId) },
+      pathname: target.pathname,
+      params: { sessionId: target.sessionId },
     });
   }
 
-  function openDaySelect() {
-    router.push('/workout/select');
-  }
-
-  function resumeWorkout(sessionId?: string) {
-    const id = sessionId ?? activeSession?.id;
-
-    if (!id || isWorking) {
+  async function resumeWorkout(session: UnfinishedSession) {
+    if (busyAction) {
       return;
     }
 
-    openSession(id);
-  }
-
-  async function discardAndStartNew() {
-    if (isWorking) {
-      return;
-    }
-
-    setIsWorking(true);
+    setBusyAction(`resume:${session.id}`);
     setErrorMessage(null);
+    const result = await listUnfinishedSessions();
 
-    const result = await discardUnfinishedSessions();
+    if (!result.ok) {
+      setSessions([]);
+      setErrorMessage(result.error);
+      setBusyAction(null);
+      return;
+    }
+
+    setSessions(result.data);
+    const match = result.data.find((item) => item.id === session.id);
+
+    if (!match || match.programDayId !== session.programDayId) {
+      setErrorMessage(`${session.name} is no longer an unfinished workout.`);
+      setBusyAction(null);
+      return;
+    }
+
+    followNavigation('resume', match.id);
+  }
+
+  async function discardSession(session: UnfinishedSession) {
+    if (busyAction) {
+      return;
+    }
+
+    setBusyAction(`discard:${session.id}`);
+    setErrorMessage(null);
+    const result = await discardUnfinishedSession(session.id);
+    const refreshed = await listUnfinishedSessions();
+    setBusyAction(null);
 
     if (!result.ok) {
       setErrorMessage(result.error);
-      setIsWorking(false);
-      const activeResult = await getLatestUnfinishedSession();
+    }
 
-      if (activeResult.ok) {
-        setActiveSession(activeResult.data);
-      }
+    if (refreshed.ok) {
+      setSessions(refreshed.data);
+    } else if (result.ok) {
+      setErrorMessage(refreshed.error);
+    }
+  }
 
+  function requestDiscard(session: UnfinishedSession) {
+    if (busyAction) {
       return;
     }
 
-    setActiveSession(null);
-    setIsWorking(false);
-    openDaySelect();
-  }
-
-  function confirmOverrideAndStartNew() {
-    Alert.alert(
-      'Discard unfinished workout?',
-      'This will discard your unfinished workout progress. Continue?',
-      [
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-        {
-          text: 'Continue',
-          style: 'destructive',
-          onPress: () => {
-            void discardAndStartNew();
-          },
-        },
-      ],
-    );
-  }
-
-  function promptUnfinishedWorkout(session: UnfinishedSession) {
-    Alert.alert(
-      'Workout in progress',
-      'You already have an unfinished workout. Do you want to resume it or override it and start a new workout?',
-      [
-        {
-          text: 'Resume Workout',
-          onPress: () => resumeWorkout(session.id),
-        },
-        {
-          text: 'Override & Start New',
-          style: 'destructive',
-          onPress: confirmOverrideAndStartNew,
-        },
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-      ],
-    );
+    confirmDiscardUnfinishedSession(session, () => {
+      void discardSession(session);
+    });
   }
 
   async function requestStartWorkout() {
-    if (isWorking) {
+    if (busyAction) {
       return;
     }
 
@@ -158,94 +156,85 @@ export default function WorkoutScreen() {
       return;
     }
 
-    let unfinished = activeSession;
+    setBusyAction('start');
 
     if (isLoading) {
-      const result = await getLatestUnfinishedSession();
+      const result = await loadSessions();
 
       if (!result.ok) {
         setErrorMessage(result.error);
+        setBusyAction(null);
         return;
       }
 
-      unfinished = result.data;
-      setActiveSession(result.data);
+      setSessions(result.data);
     }
 
-    if (!unfinished) {
-      openDaySelect();
-      return;
-    }
-
-    promptUnfinishedWorkout(unfinished);
+    followNavigation('start', null);
   }
 
-  const hasActiveSession = activeSession !== null;
+  const isBusy = busyAction !== null;
+
+  const sessionCount = sessions.length;
+  const kicker = !isLoading && sessionCount === 1 ? sessions[0]?.name ?? 'Workout' : 'Workout';
+  const title =
+    sessionCount === 0 ? "Today's Workout" : sessionCount === 1 ? 'Workout in progress' : 'Workouts in progress';
 
   return (
     <Screen>
       <View>
-        <Text style={styles.kicker}>
-          {isLoading ? 'Workout' : hasActiveSession ? activeSession.name : 'Workout'}
-        </Text>
-        <Text style={styles.title}>
-          {hasActiveSession ? 'Workout in progress' : "Today's Workout"}
-        </Text>
+        <Text style={styles.kicker}>{kicker}</Text>
+        <Text style={styles.title}>{title}</Text>
       </View>
 
-      {hasActiveSession ? (
-        <Card style={styles.activeCard}>
-          <Text style={styles.activeLabel}>Resume Workout</Text>
-          <Text style={styles.activeName}>{activeSession.name}</Text>
-          {activeSession.subtitle ? (
-            <Text style={styles.activeDetail}>{activeSession.subtitle}</Text>
-          ) : null}
-          <Text style={styles.activeDetail}>
-            Started {formatWorkoutDate(activeSession.startedAt)}
-          </Text>
-        </Card>
-      ) : (
+      {isLoading ? (
+        <Text style={styles.helper}>Checking for an in-progress workout...</Text>
+      ) : sessionCount === 0 ? (
         <Text style={styles.helper}>
-          {isLoading
-            ? 'Checking for an in-progress workout...'
-            : 'Choose a program day to start. Leaving the workout screen will keep your sets saved.'}
+          Choose a program day to start. Leaving the workout screen will keep your sets saved.
         </Text>
+      ) : (
+        sessions.map((session) => (
+          <UnfinishedSessionCard
+            key={session.id}
+            disabled={isBusy}
+            discardLabel={
+              busyAction === `discard:${session.id}` ? 'Discarding...' : 'Discard workout'
+            }
+            label="In progress"
+            resumeLabel={busyAction === `resume:${session.id}` ? 'Resuming...' : 'Resume Workout'}
+            session={session}
+            onDiscard={requestDiscard}
+            onResume={(item) => {
+              void resumeWorkout(item);
+            }}
+          />
+        ))
       )}
 
-      {hasActiveSession ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Resume Workout"
-          disabled={isWorking}
-          onPress={() => resumeWorkout()}
-          style={({ pressed }) => [
-            styles.startButton,
-            (pressed || isWorking) && styles.pressed,
-          ]}>
-          <Text style={styles.startButtonLabel}>Resume Workout</Text>
-        </Pressable>
+      {sessionCount > 0 ? (
+        <Text style={styles.helper}>
+          Choosing another day keeps these workouts. A workout is discarded only after you confirm it.
+        </Text>
       ) : null}
 
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Start Workout"
-        disabled={isWorking}
+        disabled={isBusy}
         onPress={() => {
           void requestStartWorkout();
         }}
         style={({ pressed }) => [
-          hasActiveSession ? styles.secondaryButton : styles.startButton,
-          (pressed || isWorking) && styles.pressed,
+          sessionCount > 0 ? styles.secondaryButton : styles.startButton,
+          (pressed || isBusy) && styles.pressed,
         ]}>
-        <Text
-          style={hasActiveSession ? styles.secondaryButtonLabel : styles.startButtonLabel}>
-          {isWorking ? 'Working...' : 'Start Workout'}
+        <Text style={sessionCount > 0 ? styles.secondaryButtonLabel : styles.startButtonLabel}>
+          {busyAction === 'start' ? 'Starting...' : 'Start Workout'}
         </Text>
       </Pressable>
 
-      {errorMessage ? (
-        <Text style={styles.error}>Could not load workout. {errorMessage}</Text>
-      ) : null}
+      {errorMessage ? <Text style={styles.error}>{errorMessage}</Text> : null}
     </Screen>
   );
 }
@@ -265,26 +254,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   helper: {
-    color: palette.muted,
-    fontSize: 16,
-  },
-  activeCard: {
-    gap: 4,
-  },
-  activeLabel: {
-    color: palette.accent,
-    fontSize: 14,
-    fontWeight: '700',
-    letterSpacing: 1.2,
-    textTransform: 'uppercase',
-    marginBottom: 4,
-  },
-  activeName: {
-    color: palette.text,
-    fontSize: 20,
-    fontWeight: '700',
-  },
-  activeDetail: {
     color: palette.muted,
     fontSize: 16,
   },

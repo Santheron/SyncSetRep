@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { Link } from 'expo-router';
+import { Link, useFocusEffect } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
@@ -13,33 +13,35 @@ export default function ProgramScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    let isMounted = true;
+  useFocusEffect(
+    useCallback(() => {
+      let isMounted = true;
 
-    async function loadProgramDays() {
-      const result = await listProgramDays();
+      async function loadProgramDays() {
+        const result = await listProgramDays();
 
-      if (!isMounted) {
-        return;
+        if (!isMounted) {
+          return;
+        }
+
+        if (!result.ok) {
+          setErrorMessage(result.error);
+          setProgramDays([]);
+        } else {
+          setErrorMessage(null);
+          setProgramDays(result.data);
+        }
+
+        setIsLoading(false);
       }
 
-      if (!result.ok) {
-        setErrorMessage(result.error);
-        setProgramDays([]);
-      } else {
-        setErrorMessage(null);
-        setProgramDays(result.data);
-      }
+      void loadProgramDays();
 
-      setIsLoading(false);
-    }
-
-    void loadProgramDays();
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+      return () => {
+        isMounted = false;
+      };
+    }, []),
+  );
 
   return (
     <Screen>

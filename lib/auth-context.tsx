@@ -4,6 +4,7 @@ import * as Linking from 'expo-linking';
 
 import { subscribeAuthDeepLinks } from '@/lib/auth-deep-link';
 import { isAuthCallbackUrl, logAuthRedirectTarget } from '@/lib/auth-redirect';
+import { interpretResendConfirmation, interpretSignUpResult } from '@/lib/auth-signup';
 import {
   clearPasswordResetPending,
   hasPasswordResetPending,
@@ -27,9 +28,11 @@ type AuthContextValue = {
   isPasswordRecovery: boolean;
   signIn: (email: string, password: string) => Promise<AuthResult>;
   signUp: (email: string, password: string, displayName: string) => Promise<AuthResult>;
+  resendSignUpConfirmation: (email: string) => Promise<AuthResult>;
   signOut: () => Promise<AuthResult>;
   requestPasswordReset: (email: string) => Promise<AuthResult>;
   beginPasswordRecovery: () => Promise<void>;
+  endPasswordRecovery: () => Promise<void>;
   updatePassword: (password: string) => Promise<AuthResult>;
 };
 
@@ -186,23 +189,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             },
           },
         });
+        const interpreted = interpretSignUpResult({
+          error: error
+            ? { message: error.message, status: error.status, code: error.code }
+            : null,
+          hasUser: Boolean(signUpData.user),
+          hasSession: Boolean(signUpData.session),
+          identityCount: signUpData.user?.identities ? signUpData.user.identities.length : null,
+        });
 
-        if (error) {
-          return { error: error.message };
+        if (interpreted.kind === 'signed-in') {
+          if (signUpData.user) {
+            await ensureProfile(signUpData.user);
+          }
+
+          return { error: null };
         }
 
-        if (signUpData.user && !signUpData.session) {
-          return {
-            error: null,
-            needsConfirmation: true,
-          };
+        if (interpreted.kind === 'confirmation') {
+          return { error: null, needsConfirmation: true };
         }
 
-        if (signUpData.user) {
-          await ensureProfile(signUpData.user);
+        return { error: interpreted.message };
+      },
+      async resendSignUpConfirmation(email) {
+        const { error } = await supabase.auth.resend({
+          type: 'signup',
+          email: email.trim(),
+          options: {
+            emailRedirectTo: logAuthRedirectTarget(),
+          },
+        });
+        const interpreted = interpretResendConfirmation(
+          error ? { message: error.message, status: error.status, code: error.code } : null,
+        );
+
+        if (interpreted.kind === 'accepted') {
+          return { error: null, needsConfirmation: true };
         }
 
-        return { error: null };
+        return { error: interpreted.message };
       },
       async signOut() {
         setIsPasswordRecovery(false);
@@ -243,6 +269,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       async beginPasswordRecovery() {
         setIsPasswordRecovery(true);
         await markPasswordResetPending();
+      },
+      async endPasswordRecovery() {
+        setIsPasswordRecovery(false);
+        await clearPasswordResetPending();
       },
       async updatePassword(password) {
         const { error } = await supabase.auth.updateUser({ password });
