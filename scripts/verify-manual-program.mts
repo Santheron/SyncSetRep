@@ -17,8 +17,9 @@ import {
   applyManualNumber,
   exerciseChoiceText,
   filterCatalog,
+  ALREADY_CURRENT_PROGRAM_MESSAGE,
+  FIRST_PROGRAM_UNAVAILABLE_MESSAGE,
   hasCurrentProgram,
-  MANUAL_NO_ACTIVE_PROGRAM_MESSAGE,
   MANUAL_REPS_MESSAGE,
   MANUAL_SAVE_ONCE_MESSAGE,
   MANUAL_SETS_MESSAGE,
@@ -36,6 +37,7 @@ import {
 } from '../lib/import/manual-program.ts';
 import {
   ACTIVATION_RPC_ENABLED,
+  OWNED_PROGRAM_RPC_ENABLED,
   PROGRAM_SWITCH_UNAVAILABLE_MESSAGE,
   activateOwnedProgramForCurrentUser,
   loadExerciseCatalog,
@@ -388,7 +390,7 @@ try {
   });
   assert.equal(blocked.ok, false);
   if (!blocked.ok) {
-    assert.deepEqual(blocked.errors, [MANUAL_NO_ACTIVE_PROGRAM_MESSAGE]);
+    assert.deepEqual(blocked.errors, [FIRST_PROGRAM_UNAVAILABLE_MESSAGE]);
   }
   const inactiveOnly = await saveManualProgram(review, {
     userId: USER_ID,
@@ -396,8 +398,65 @@ try {
     rpc,
   });
   assert.equal(inactiveOnly.ok, false);
+  if (!inactiveOnly.ok) {
+    assert.deepEqual(inactiveOnly.errors, [FIRST_PROGRAM_UNAVAILABLE_MESSAGE]);
+  }
   assert.equal(rpcCalls, 0);
   assert.deepEqual(saved, []);
+
+  const invalidFirst = await saveManualProgram(
+    edit(review, { type: 'rename-program', name: '   ' }),
+    {
+      userId: USER_ID,
+      programs: Object.freeze([]),
+      rpc,
+      ownedRpc: async () => {
+        rpcCalls += 1;
+        return { data: 70, error: null };
+      },
+    },
+  );
+  assert.equal(invalidFirst.ok, false);
+  if (!invalidFirst.ok) {
+    assert.equal(invalidFirst.errors.includes(FIRST_PROGRAM_UNAVAILABLE_MESSAGE), false);
+  }
+  assert.equal(rpcCalls, 0);
+
+  let ownedCalls = 0;
+  const ownedFirst = await saveManualProgram(review, {
+    userId: USER_ID,
+    programs: Object.freeze([]),
+    rpc,
+    ownedRpc: async (args) => {
+      ownedCalls += 1;
+      assert.equal(args.p_make_current, true);
+      assert.deepEqual(Object.keys(args.p_program).sort(), ['days', 'name']);
+      const serialized = JSON.stringify(args.p_program);
+      for (const token of ['is_active', 'workout_sessions', 'workout_sets', 'rest_seconds', 'user_id']) {
+        assert.equal(serialized.includes(token), false, token);
+      }
+      return { data: 70, error: null };
+    },
+  });
+  assert.equal(ownedFirst.ok, true);
+  if (ownedFirst.ok) {
+    assert.equal(ownedFirst.programId, '70');
+  }
+  assert.equal(ownedCalls, 1);
+  assert.equal(rpcCalls, 0);
+  assert.deepEqual(history, before);
+
+  const alreadyCurrent = await saveManualProgram(review, {
+    userId: USER_ID,
+    programs: Object.freeze([{ id: '8', name: 'Off season', isActive: false }]),
+    rpc,
+    ownedRpc: async () => ({ data: null, error: { message: 'active_program_exists' } }),
+  });
+  assert.equal(alreadyCurrent.ok, false);
+  if (!alreadyCurrent.ok) {
+    assert.deepEqual(alreadyCurrent.errors, [ALREADY_CURRENT_PROGRAM_MESSAGE]);
+  }
+  assert.equal(rpcCalls, 0);
 
   const savedResult = await saveManualProgram(review, {
     userId: USER_ID,
@@ -546,8 +605,27 @@ try {
   });
   assert.equal(noCurrent.ok, false);
   if (!noCurrent.ok) {
-    assert.deepEqual(noCurrent.errors, [MANUAL_NO_ACTIVE_PROGRAM_MESSAGE]);
+    assert.deepEqual(noCurrent.errors, [FIRST_PROGRAM_UNAVAILABLE_MESSAGE]);
   }
+  assert.equal(validationCalls, 0);
+  assert.equal(OWNED_PROGRAM_RPC_ENABLED, false);
+  let injectedOwnedCalls = 0;
+  const injectedFirst = await saveManualProgramForCurrentUser(review, {
+    getUserId: async () => ({ ok: true, data: USER_ID }),
+    loadPrograms: async () => ({ ok: true, data: [] }),
+    rpc: validationRpc,
+    ownedRpc: async (args) => {
+      injectedOwnedCalls += 1;
+      assert.equal(args.p_make_current, true);
+      assert.equal(Object.prototype.hasOwnProperty.call(args.p_program, 'user_id'), false);
+      return { data: 71, error: null };
+    },
+  });
+  assert.equal(injectedFirst.ok, true);
+  if (injectedFirst.ok) {
+    assert.equal(injectedFirst.programId, '71');
+  }
+  assert.equal(injectedOwnedCalls, 1);
   assert.equal(validationCalls, 0);
 
   const remappedSignIn = await saveManualProgramForCurrentUser(review, {
@@ -750,6 +828,16 @@ try {
   assert.equal(savedScreen.includes('requestProgramSwitch'), true);
   assert.equal(savedScreen.includes('supabase'), false);
   assert.equal(clientSource.includes('ACTIVATION_RPC_ENABLED = false'), true);
+  assert.equal(clientSource.includes('OWNED_PROGRAM_RPC_ENABLED = false'), true);
+  assert.equal(
+    clientSource.includes('io?.ownedRpc ?? (OWNED_PROGRAM_RPC_ENABLED ? defaultOwnedSaveRpc : undefined)'),
+    true,
+  );
+  assert.equal(builderSource.includes('SAVE_FIRST_ROUTINE_LABEL'), true);
+  assert.equal(builderSource.includes('FIRST_PROGRAM_NOTICE'), true);
+  assert.equal(builderSource.includes('MANUAL_NO_ACTIVE_PROGRAM_MESSAGE'), false);
+  assert.equal(buildScreen.includes('save_owned_program'), false);
+  assert.equal(buildScreen.includes('activate_owned_program'), false);
   assert.equal(clientSource.includes(VIEW_SAVED_PROGRAMS_LABEL), false);
   assert.equal(buildScreen.includes('listProgramDays'), false);
   assert.equal(savedScreen.includes('listProgramDays'), false);

@@ -33,9 +33,33 @@ assert.equal(/\b(update|delete)\s+/i.test(rollbackBody), false);
 assert.equal(rollbackBody.includes('workout_sessions'), false);
 assert.equal(rollbackBody.includes('public.programs'), false);
 
+const disableSql = readSql('program-starter-disable.sql');
+const disableRollbackSql = readSql('program-starter-disable-rollback.sql');
+const disableBody = stripSql(disableSql);
+const disableRollbackBody = stripSql(disableRollbackSql);
+assert.match(disableSql, /NOT APPLIED/);
+assert.match(disableBody, /starter_program_disabled/);
+assert.match(disableBody, /SECURITY DEFINER/);
+assert.match(disableBody, /SET search_path = ''/);
+assert.match(
+  disableBody,
+  /REVOKE ALL ON FUNCTION public\.copy_starter_program_for_current_user\(\) FROM PUBLIC, anon, authenticated/,
+);
+assert.equal(/\binsert\s+into\b/i.test(disableBody), false);
+assert.equal(/\bupdate\s+public\./i.test(disableBody), false);
+assert.equal(/\bdelete\s+from\b/i.test(disableBody), false);
+assert.equal(disableBody.includes('workout_sessions'), false);
+assert.equal(disableBody.includes('workout_sets'), false);
+assert.match(disableRollbackSql, /NOT AN INSTALL STEP/);
+assert.match(disableRollbackBody, /INSERT INTO public\.programs/);
+assert.match(disableRollbackBody, /GRANT EXECUTE ON FUNCTION public\.copy_starter_program_for_current_user\(\) TO authenticated/);
+assert.equal(disableRollbackBody.includes('workout_sessions'), false);
+assert.equal(disableRollbackBody.includes('workout_sets'), false);
+
 const USER_A = '11111111-1111-1111-1111-111111111111';
 const USER_B = '22222222-2222-2222-2222-222222222222';
 const USER_C = '33333333-3333-3333-3333-333333333333';
+const USER_D = '44444444-4444-4444-4444-444444444444';
 
 const fixtureSql = `
 CREATE SCHEMA IF NOT EXISTS auth;
@@ -219,6 +243,108 @@ async function runBehavior(PGlite: new () => PgLike) {
   assert.deepEqual(afterBlank.sets, seeded.sets);
   assert.equal(afterBlank.profiles.filter((row) => row.id === USER_A).length, 1);
   assert.equal(afterBlank.profiles.filter((row) => row.id === USER_B).length, 1);
+
+  await db.exec(`
+    CREATE ROLE anon NOLOGIN;
+    CREATE ROLE authenticated NOLOGIN;
+  `);
+  await db.exec(disableSql);
+  let starterRaised = false;
+  try {
+    await db.exec(`SELECT public.copy_starter_program('${USER_A}', NULL)`);
+  } catch (error) {
+    starterRaised = true;
+    assert.match(error instanceof Error ? error.message : String(error), /starter_program_disabled/);
+  }
+  assert.equal(starterRaised, true);
+  const starterExecute = await db.query<{ allowed: boolean }>(`
+    SELECT has_function_privilege(
+      'authenticated',
+      'public.copy_starter_program_for_current_user()',
+      'EXECUTE'
+    ) AS allowed
+  `);
+  assert.equal(starterExecute.rows[0]?.allowed, false);
+  assert.deepEqual((await snapshot(db)).programs, seeded.programs);
+
+  await db.exec(rollbackSql);
+  await db.exec(`
+    INSERT INTO auth.users (id, email, raw_user_meta_data)
+    VALUES ('${USER_D}', 'chooser@example.com', '{"display_name":"Chooser"}'::jsonb);
+  `);
+  const afterDisabledSignup = await snapshot(db);
+  assert.equal(afterDisabledSignup.programs.filter((row) => row.user_id === USER_D).length, 0);
+  assert.equal(afterDisabledSignup.programs.filter((row) => row.name === 'Starter').length, 0);
+  assert.equal(afterDisabledSignup.profiles.find((row) => row.id === USER_D)?.display_name, 'Chooser');
+  assert.deepEqual(afterDisabledSignup.programs, seeded.programs);
+  assert.deepEqual(afterDisabledSignup.sessions, seeded.sessions);
+  assert.deepEqual(afterDisabledSignup.sets, seeded.sets);
+
+  await db.exec(`
+    ALTER TABLE public.programs
+      ADD COLUMN slug text,
+      ADD COLUMN created_at timestamptz NOT NULL DEFAULT now(),
+      ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now();
+    ALTER TABLE public.program_days
+      ADD COLUMN subtitle text,
+      ADD COLUMN day_order integer;
+    CREATE TABLE public.program_exercises (
+      id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      program_day_id bigint NOT NULL,
+      exercise_id bigint NOT NULL,
+      exercise_order integer NOT NULL,
+      target_sets integer NOT NULL,
+      min_reps integer,
+      max_reps integer,
+      notes text
+    );
+    CREATE TABLE public.program_templates (
+      id bigint PRIMARY KEY,
+      name text,
+      slug text,
+      is_default boolean
+    );
+    CREATE TABLE public.program_template_days (
+      id bigint PRIMARY KEY,
+      template_id bigint,
+      name text,
+      subtitle text,
+      day_order integer
+    );
+    CREATE TABLE public.program_template_exercises (
+      id bigint PRIMARY KEY,
+      template_day_id bigint,
+      exercise_id bigint,
+      exercise_order integer,
+      target_sets integer,
+      min_reps integer,
+      max_reps integer,
+      notes text
+    );
+  `);
+  await db.exec(disableRollbackSql);
+  const restoredStarter = await db.query<{ prosrc: string }>(`
+    SELECT prosrc
+    FROM pg_proc
+    WHERE proname = 'copy_starter_program'
+    ORDER BY oid DESC
+    LIMIT 1
+  `);
+  assert.match(restoredStarter.rows[0]?.prosrc ?? '', /INSERT INTO public\.programs/);
+  assert.deepEqual((await snapshot(db)).programs, seeded.programs);
+  assert.deepEqual((await snapshot(db)).sessions, seeded.sessions);
+
+  await db.exec(disableSql);
+  let restoredCallRaised = false;
+  try {
+    await db.exec(`SELECT public.copy_starter_program('${USER_D}', NULL)`);
+  } catch (error) {
+    restoredCallRaised = true;
+    assert.match(error instanceof Error ? error.message : String(error), /starter_program_disabled/);
+  }
+  assert.equal(restoredCallRaised, true);
+  assert.deepEqual((await snapshot(db)).programs, seeded.programs);
+  assert.deepEqual((await snapshot(db)).sets, seeded.sets);
 }
 
 const pg = await loadPg();

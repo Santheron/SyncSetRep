@@ -1,5 +1,5 @@
 -- NOT APPLIED.
--- Adds two invoker functions for an explicit current-program choice.
+-- Adds two SECURITY DEFINER functions for an explicit current-program choice.
 -- Does not replace public.save_imported_program.
 -- Does not copy a starter template.
 -- Does not read or write logged workout history.
@@ -9,14 +9,19 @@
 -- caller's program rows, in an order the one-active index accepts.
 -- Both functions lock the caller's programs and take the same transaction
 -- advisory lock. The partial unique index remains the database guarantee.
+-- Authorization is auth.uid(). Neither function accepts a user id.
+-- Neither function reads or sets a custom GUC.
+-- Apply this file as the owner of public.programs. The privilege file then
+-- allows is_active writes only for that same owner, which owns these
+-- functions. Apply it after starter assignment is disabled and before the
+-- privilege file. Do not apply the files out of that order.
 -- Requires programs.updated_at and UNIQUE NULLS NOT DISTINCT
 -- (program_id, day_order) on program_days. This file does not create them.
 -- Payload checks match the verified save_imported_program limits.
 -- lock_timeout and statement_timeout below cover this install transaction.
 -- Each function also sets those limits for its own transaction.
--- Each function sets syncsetrep.program_activation for that same transaction.
--- A separate unapplied privilege file can require that setting before
--- is_active changes. This file does not install that restriction.
+-- Those settings last until the transaction ends. A failed call rolls back.
+-- This file does not install the column-privilege restriction.
 
 BEGIN;
 
@@ -29,7 +34,7 @@ CREATE OR REPLACE FUNCTION public.save_owned_program(
 )
 RETURNS bigint
 LANGUAGE plpgsql
-SECURITY INVOKER
+SECURITY DEFINER
 SET search_path = ''
 AS $save_owned$
 DECLARE
@@ -65,7 +70,6 @@ DECLARE
 BEGIN
   PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
   PERFORM pg_catalog.set_config('statement_timeout', '30s', true);
-  PERFORM pg_catalog.set_config('syncsetrep.program_activation', 'on', true);
 
   IF uid IS NULL THEN
     RAISE EXCEPTION 'Not authenticated';
@@ -336,7 +340,7 @@ $save_owned$;
 CREATE OR REPLACE FUNCTION public.activate_owned_program(p_program_id bigint)
 RETURNS bigint
 LANGUAGE plpgsql
-SECURITY INVOKER
+SECURITY DEFINER
 SET search_path = ''
 AS $activate_owned$
 DECLARE
@@ -348,7 +352,6 @@ DECLARE
 BEGIN
   PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
   PERFORM pg_catalog.set_config('statement_timeout', '30s', true);
-  PERFORM pg_catalog.set_config('syncsetrep.program_activation', 'on', true);
 
   IF uid IS NULL THEN
     RAISE EXCEPTION 'Not authenticated';
@@ -416,8 +419,8 @@ BEGIN
 END;
 $activate_owned$;
 
-REVOKE ALL ON FUNCTION public.save_owned_program(jsonb, boolean) FROM PUBLIC, anon;
-REVOKE ALL ON FUNCTION public.activate_owned_program(bigint) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.save_owned_program(jsonb, boolean) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.activate_owned_program(bigint) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.save_owned_program(jsonb, boolean) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.activate_owned_program(bigint) TO authenticated;
 

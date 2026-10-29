@@ -32,16 +32,27 @@ import {
   type SaveImportedProgramResult,
 } from './save-imported-program.ts';
 import { IMPORT_CAPACITY_MESSAGE } from './save-plan.ts';
+import { toSavePayload, type SaveImportedProgramPayload } from './save-payload.ts';
 
 // Manual routines use the same review state as an import preview.
 // They do not call a model or consume an import quota.
-// Saving stays on save_imported_program and does not create a starter program.
+// An additional routine stays on save_imported_program.
+// The first routine uses save_owned_program only when that call is supplied.
+// Neither path creates a starter program.
 
-export const MANUAL_NO_ACTIVE_PROGRAM_MESSAGE =
-  'A new routine can be saved only while you already have a current program. Nothing was saved, and no starter program was created.';
+export const FIRST_PROGRAM_NOTICE =
+  'This routine would become your current program. This build will not save it until program setup is reviewed. No starter program is created.';
+
+export const FIRST_PROGRAM_UNAVAILABLE_MESSAGE =
+  'Saving your first routine stays off until program setup is reviewed. Nothing was saved, and no starter program was created.';
+
+export const ALREADY_CURRENT_PROGRAM_MESSAGE =
+  'You already have a current program. Nothing was saved.';
 
 export const MANUAL_SAVED_INACTIVE_MESSAGE =
   'Saved. This routine is not your current program.';
+
+export const MANUAL_SAVED_CURRENT_MESSAGE = 'Saved. This routine is your current program.';
 
 export const MANUAL_SAVE_ONCE_MESSAGE = 'This screen will not save this routine again.';
 
@@ -68,6 +79,7 @@ export const MANUAL_REPS_MESSAGE = `Enter reps from ${REPS_MIN} through ${REPS_M
 export const ADD_DAY_LABEL = 'Add day';
 export const ADD_EXERCISE_LABEL = 'Add exercise';
 export const SAVE_ROUTINE_LABEL = 'Save routine';
+export const SAVE_FIRST_ROUTINE_LABEL = 'Save and use this routine';
 export const PROGRAM_NAME_LABEL = 'Program name';
 export const CHOOSE_EXERCISE_LABEL = 'Choose exercise';
 
@@ -87,6 +99,11 @@ export type CatalogExercise = {
   id: string;
   name: string;
 };
+
+export type OwnedProgramSaveRpc = (args: {
+  p_program: SaveImportedProgramPayload;
+  p_make_current: true;
+}) => Promise<{ data: unknown; error: { message?: string | null } | null }>;
 
 export type SavedProgramListItem = {
   id: string;
@@ -355,16 +372,63 @@ export function applyManualNumber(
   return { review: next, error: null };
 }
 
+function ownedProgramId(data: unknown): string | null {
+  if (typeof data === 'number' && Number.isSafeInteger(data) && data > 0) {
+    return String(data);
+  }
+  if (typeof data === 'string' && /^[1-9][0-9]*$/.test(data)) {
+    return data;
+  }
+  return null;
+}
+
+function ownedSaveError(message: string | null | undefined): string {
+  const text = message ?? '';
+  if (text.includes('Not authenticated')) {
+    return MANUAL_SIGN_IN_SAVE_MESSAGE;
+  }
+  if (text.includes('active_program_exists')) {
+    return ALREADY_CURRENT_PROGRAM_MESSAGE;
+  }
+  return 'Could not save this routine. Nothing was saved.';
+}
+
 export async function saveManualProgram(
   review: ProgramReview,
   options: {
     userId: string;
     programs: readonly SavedProgramSummary[];
     rpc: ImportSaveRpc;
+    ownedRpc?: OwnedProgramSaveRpc;
   },
 ): Promise<SaveImportedProgramResult> {
   if (!hasCurrentProgram(options.programs)) {
-    return { ok: false, errors: [MANUAL_NO_ACTIVE_PROGRAM_MESSAGE] };
+    const payload = toSavePayload(toImportPreview(review), options.userId, {
+      hasActiveProgram: true,
+    });
+    if (!payload.ok) {
+      return payload;
+    }
+    if (!options.ownedRpc) {
+      return { ok: false, errors: [FIRST_PROGRAM_UNAVAILABLE_MESSAGE] };
+    }
+    let response: { data: unknown; error: { message?: string | null } | null };
+    try {
+      response = await options.ownedRpc({
+        p_program: payload.payload,
+        p_make_current: true,
+      });
+    } catch {
+      return { ok: false, errors: ['Could not save this routine. Nothing was saved.'] };
+    }
+    if (response.error) {
+      return { ok: false, errors: [ownedSaveError(response.error.message)] };
+    }
+    const programId = ownedProgramId(response.data);
+    if (programId == null) {
+      return { ok: false, errors: ['Could not save this routine. Nothing was saved.'] };
+    }
+    return { ok: true, programId };
   }
   return saveImportedProgram(toImportPreview(review), {
     userId: options.userId,

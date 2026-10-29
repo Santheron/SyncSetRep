@@ -57,8 +57,8 @@ facts AS (
 SELECT
   save_present
   AND activate_present
-  AND save_security_definer IS FALSE
-  AND activate_security_definer IS FALSE
+  AND save_security_definer IS TRUE
+  AND activate_security_definer IS TRUE
   AND save_search_path_empty
   AND activate_search_path_empty
   AND rejects_second_current
@@ -67,6 +67,10 @@ SELECT
   AND activate_authenticated_execute
   AND save_anon_revoked
   AND activate_anon_revoked
+  AND COALESCE((SELECT prosrc NOT LIKE '%syncsetrep.program_activation%' FROM owned_save), false)
+  AND COALESCE((SELECT prosrc NOT LIKE '%syncsetrep.program_activation%' FROM owned_activate), false)
+  AND COALESCE((SELECT prosrc LIKE '%auth.uid()%' FROM owned_save), false)
+  AND COALESCE((SELECT prosrc LIKE '%auth.uid()%' FROM owned_activate), false)
   AS post_activation_functions_ok
 FROM facts;
 

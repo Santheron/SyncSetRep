@@ -17,10 +17,12 @@ import {
   ADD_DAY_LABEL,
   ADD_EXERCISE_LABEL,
   CHOOSE_EXERCISE_LABEL,
-  MANUAL_NO_ACTIVE_PROGRAM_MESSAGE,
+  FIRST_PROGRAM_NOTICE,
   MANUAL_SAVE_ONCE_MESSAGE,
+  MANUAL_SAVED_CURRENT_MESSAGE,
   MANUAL_SAVED_INACTIVE_MESSAGE,
   PROGRAM_NAME_LABEL,
+  SAVE_FIRST_ROUTINE_LABEL,
   SAVE_ROUTINE_LABEL,
   VIEW_SAVED_PROGRAMS_LABEL,
   addExerciseLabel,
@@ -118,16 +120,20 @@ export function ManualProgramBuilder({
   }
 
   const catalogMatches = filterCatalog(catalog, catalogQuery);
+  const saveLabel = hasActiveProgram ? SAVE_ROUTINE_LABEL : SAVE_FIRST_ROUTINE_LABEL;
+  const savedMessage = hasActiveProgram ? MANUAL_SAVED_INACTIVE_MESSAGE : MANUAL_SAVED_CURRENT_MESSAGE;
 
   return (
     <Screen keyboardShouldPersistTaps="handled">
       <Text style={styles.title}>Build a routine</Text>
       <Text style={styles.subtitle}>
-        This creates a saved routine and leaves your current program and workout history unchanged.
+        {hasActiveProgram
+          ? 'This creates a saved routine and leaves your current program and workout history unchanged.'
+          : 'This routine would become your current program. Workout history stays unchanged.'}
       </Text>
       {hasActiveProgram ? null : (
-        <Text accessibilityLabel={MANUAL_NO_ACTIVE_PROGRAM_MESSAGE} style={styles.notice}>
-          {MANUAL_NO_ACTIVE_PROGRAM_MESSAGE}
+        <Text accessibilityLabel={FIRST_PROGRAM_NOTICE} style={styles.notice}>
+          {FIRST_PROGRAM_NOTICE}
         </Text>
       )}
 
@@ -326,19 +332,19 @@ export function ManualProgramBuilder({
         </Text>
       ))}
       {savedProgramId ? (
-        <Text accessibilityLabel={MANUAL_SAVED_INACTIVE_MESSAGE} style={styles.notice}>
-          {MANUAL_SAVED_INACTIVE_MESSAGE} Saved id {savedProgramId}. {MANUAL_SAVE_ONCE_MESSAGE}
+        <Text accessibilityLabel={savedMessage} style={styles.notice}>
+          {savedMessage} Saved id {savedProgramId}. {MANUAL_SAVE_ONCE_MESSAGE}
         </Text>
       ) : null}
 
       {savedProgramId == null ? (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={SAVE_ROUTINE_LABEL}
+          accessibilityLabel={saveLabel}
           disabled={isSaving}
           onPress={onSave}
           style={({ pressed }) => [styles.primaryButton, (pressed || isSaving) && styles.pressed]}>
-          <Text style={styles.primaryButtonLabel}>{isSaving ? 'Saving...' : SAVE_ROUTINE_LABEL}</Text>
+          <Text style={styles.primaryButtonLabel}>{isSaving ? 'Saving...' : saveLabel}</Text>
         </Pressable>
       ) : (
         <Link href="/program/saved" asChild>

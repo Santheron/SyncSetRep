@@ -13,6 +13,7 @@ const userB = '22222222-2222-2222-2222-222222222222';
 const userC = '33333333-3333-3333-3333-333333333333';
 const userD = '44444444-4444-4444-4444-444444444444';
 const activationSqlPath = fileURLToPath(new URL('../sql/program-activation.sql', import.meta.url));
+const privilegeSqlPath = fileURLToPath(new URL('../sql/program-activation-privilege.sql', import.meta.url));
 
 const psqlPath = join(bin, 'psql.exe');
 const initdbPath = join(bin, 'initdb.exe');
@@ -245,6 +246,20 @@ async function main() {
 
     const migration = await psql(await readFile(activationSqlPath, 'utf8'));
     assert.equal(migration.code, 0, migration.stderr);
+    const privilege = await psql(await readFile(privilegeSqlPath, 'utf8'));
+    assert.equal(privilege.code, 0, privilege.stderr);
+    const definer = await psql(`
+      SELECT prosecdef::text
+      FROM pg_proc
+      WHERE oid IN (
+        to_regprocedure('public.save_owned_program(jsonb, boolean)'),
+        to_regprocedure('public.activate_owned_program(bigint)')
+      )
+      ORDER BY 1;
+    `);
+    assert.equal(definer.code, 0, definer.stderr);
+    assert.equal(definer.stdout.includes('f'), false, definer.stdout);
+    assert.match(definer.stdout, /t/);
 
     const historySql = `
       SELECT coalesce(string_agg(row_to_json(s)::text, ',' ORDER BY s.id), '')
@@ -424,6 +439,68 @@ async function main() {
       WHERE user_id = '${userC}';
     `);
     assert.match(firstState.stdout, /1:1/);
+
+    const flagsBeforeProbes = await psql(`
+      SELECT id::text || ':' || is_active::text
+      FROM public.programs
+      ORDER BY id;
+    `);
+    assert.equal(flagsBeforeProbes.code, 0, flagsBeforeProbes.stderr);
+    const columnPrivileges = await psql(`
+      SELECT has_column_privilege('authenticated', 'public.programs', 'is_active', 'UPDATE')::text
+        || ':' || has_column_privilege('authenticated', 'public.programs', 'name', 'UPDATE')::text
+        || ':' || has_table_privilege('authenticated', 'public.programs', 'UPDATE')::text
+        || ':' || has_table_privilege('authenticated', 'public.programs', 'INSERT')::text;
+    `);
+    assert.equal(columnPrivileges.code, 0, columnPrivileges.stderr);
+    assert.match(columnPrivileges.stdout, /false:true:false:true/);
+    const locked = await psql(asUser(
+      userA,
+      'SELECT id FROM public.programs WHERE id = 1 FOR UPDATE;',
+    ));
+    assert.equal(locked.code, 0, locked.stderr);
+    const denied = await psql(asUser(
+      userA,
+      'UPDATE public.programs SET is_active = false WHERE id = 1;',
+    ));
+    assert.notEqual(denied.code, 0);
+    assert.match(denied.stderr, /permission denied/);
+    const gucBypass = await psql(`
+      BEGIN;
+      SELECT set_config('request.jwt.claim.sub', '${userA}', true);
+      SELECT set_config('syncsetrep.program_activation', 'on', true);
+      SET LOCAL ROLE authenticated;
+      UPDATE public.programs SET is_active = false WHERE id = 1;
+      COMMIT;
+    `);
+    assert.notEqual(gucBypass.code, 0);
+    assert.match(gucBypass.stderr, /permission denied/);
+    const directInsert = await psql(asUser(
+      userA,
+      `INSERT INTO public.programs (user_id, name, is_active) VALUES ('${userA}', 'Direct', true);`,
+    ));
+    assert.notEqual(directInsert.code, 0);
+    assert.match(directInsert.stderr, /program_activation_rpc_required/);
+    const anonCall = await psql(`
+      BEGIN;
+      SET LOCAL ROLE anon;
+      SELECT public.activate_owned_program(1);
+      COMMIT;
+    `);
+    assert.notEqual(anonCall.code, 0);
+    assert.match(anonCall.stderr, /permission denied/);
+    const unsignedCall = await psql('SELECT public.activate_owned_program(1);');
+    assert.notEqual(unsignedCall.code, 0);
+    assert.match(unsignedCall.stderr, /Not authenticated/);
+    const ownerReassign = await psql(`UPDATE public.programs SET user_id = '${userB}' WHERE id = 1;`);
+    assert.notEqual(ownerReassign.code, 0);
+    assert.match(ownerReassign.stderr, /program_owner_change_forbidden/);
+    const flagsAfterProbes = await psql(`
+      SELECT id::text || ':' || is_active::text
+      FROM public.programs
+      ORDER BY id;
+    `);
+    assert.equal(flagsAfterProbes.stdout, flagsBeforeProbes.stdout);
 
     const afterHistory = await psql(historySql);
     const afterSets = await psql(setsSql);

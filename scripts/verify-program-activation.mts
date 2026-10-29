@@ -35,8 +35,12 @@ for (const sql of [activationBody, rollbackBody, verifyBody]) {
   assert.equal(sql.includes('save_imported_program'), false);
 }
 
-assert.match(activationBody, /SECURITY INVOKER/);
-assert.equal(/security definer/i.test(activationBody), false);
+assert.match(activationBody, /SECURITY DEFINER/);
+assert.equal(activationBody.match(/SECURITY DEFINER/g)?.length, 2);
+assert.equal(/security invoker/i.test(activationBody), false);
+assert.equal(activationBody.includes('syncsetrep.program_activation'), false);
+assert.equal(activationBody.includes('p_user'), false);
+assert.equal(activationBody.match(/auth\.uid\(\)/g)?.length, 2);
 assert.match(activationBody, /SET search_path = ''/);
 assert.match(activationBody, /pg_catalog\.pg_advisory_xact_lock/);
 assert.match(activationBody, /programs_one_active_per_user_uidx/);
@@ -45,7 +49,14 @@ assert.match(activationBody, /active_program_count/);
 assert.match(activationBody, /program_not_found/);
 assert.match(activationBody, /FOR UPDATE/);
 assert.match(activationBody, /VALUES \(uid, program_name, NULL, make_current\)/);
-assert.match(activationBody, /syncsetrep\.program_activation/);
+assert.match(
+  activationBody,
+  /REVOKE ALL ON FUNCTION public\.save_owned_program\(jsonb, boolean\) FROM PUBLIC, anon, authenticated/,
+);
+assert.match(
+  activationBody,
+  /REVOKE ALL ON FUNCTION public\.activate_owned_program\(bigint\) FROM PUBLIC, anon, authenticated/,
+);
 
 const privilegeSql = readSql('program-activation-privilege.sql');
 const privilegeRollbackSql = readSql('program-activation-privilege-rollback.sql');
@@ -58,11 +69,22 @@ assert.equal(privilegeRollbackSql.includes('workout_sets'), false);
 assert.equal(privilegeBody.includes('copy_starter'), false);
 assert.equal(privilegeBody.includes('save_imported_program'), false);
 assert.match(privilegeBody, /program_activation_rpc_required/);
-assert.match(privilegeBody, /syncsetrep\.program_activation/);
+assert.match(privilegeBody, /program_owner_change_forbidden/);
+assert.match(privilegeBody, /SECURITY INVOKER/);
+assert.equal(privilegeBody.includes('syncsetrep.program_activation'), false);
+assert.match(privilegeBody, /REVOKE UPDATE ON TABLE public\.programs FROM authenticated/);
+assert.match(
+  privilegeBody,
+  /GRANT UPDATE \(name, slug, updated_at\) ON TABLE public\.programs TO authenticated/,
+);
+assert.match(privilegeBody, /pg_catalog\.pg_get_userbyid/);
 assert.match(privilegeBody, /GRANT EXECUTE ON FUNCTION public\.enforce_program_activation\(\) TO authenticated/);
 assert.match(privilegeRollbackBody, /DROP TRIGGER IF EXISTS programs_activation_rpc ON public\.programs/);
 assert.match(privilegeRollbackBody, /DROP FUNCTION IF EXISTS public\.enforce_program_activation\(\)/);
-assert.equal(/\b(insert|update|delete)\s+/i.test(privilegeRollbackBody), false);
+assert.match(privilegeRollbackBody, /GRANT UPDATE ON TABLE public\.programs TO authenticated/);
+assert.equal(/\binsert\s+into\b/i.test(privilegeRollbackBody), false);
+assert.equal(/\bdelete\s+from\b/i.test(privilegeRollbackBody), false);
+assert.equal(/\bupdate\s+public\.programs\s+set\b/i.test(privilegeRollbackBody), false);
 assert.equal(/\bdelete\s+from\b/i.test(activationBody), false);
 assert.equal(/update\s+public\.program_days\b/i.test(activationBody), false);
 assert.equal(/update\s+public\.program_exercises\b/i.test(activationBody), false);
@@ -71,7 +93,22 @@ assert.match(rollbackBody, /DROP FUNCTION IF EXISTS public\.save_owned_program\(
 assert.equal(/\b(insert|update|delete)\b/i.test(rollbackBody), false);
 assert.match(verifyBody, /default_transaction_read_only = on/);
 assert.match(verifyBody, /post_activation_functions_ok/);
+assert.match(verifyBody, /save_security_definer IS TRUE/);
+assert.match(verifyBody, /activate_security_definer IS TRUE/);
 assert.equal(/\b(insert|update|delete|create|alter|drop|grant|revoke)\b/i.test(verifyBody), false);
+
+for (const name of ['program-setup-preflight.sql', 'program-setup-postcheck.sql']) {
+  const reviewSql = readSql(name);
+  const reviewBody = stripSql(reviewSql);
+  assert.match(reviewSql, /READ ONLY/);
+  assert.match(reviewSql, /NOT AN INSTALL STEP/);
+  assert.match(reviewSql, /default_transaction_read_only = on/);
+  assert.equal(/from\s+auth\.users/i.test(reviewBody), false, name);
+  assert.equal(/\binsert\s+into\b/i.test(reviewBody), false, name);
+  assert.equal(/\bdelete\s+from\b/i.test(reviewBody), false, name);
+  assert.equal(/\bupdate\s+public\./i.test(reviewBody), false, name);
+  assert.equal(/\b(grant|revoke)\b/i.test(reviewBody), false, name);
+}
 
 const USER_A = '11111111-1111-1111-1111-111111111111';
 const USER_B = '22222222-2222-2222-2222-222222222222';
@@ -281,6 +318,23 @@ async function expectRaise(db: PgLike, userId: string | null, sql: string, patte
   assert.equal(raised, true, pattern);
 }
 
+async function expectSessionRaise(db: PgLike, setupSql: string, sql: string, pattern: string) {
+  let raised = false;
+  await db.exec('BEGIN');
+  try {
+    if (setupSql !== '') {
+      await db.exec(setupSql);
+    }
+    await db.query(sql);
+    await db.exec('ROLLBACK');
+  } catch (error) {
+    raised = true;
+    await db.exec('ROLLBACK').catch(() => undefined);
+    assert.match(error instanceof Error ? error.message : String(error), new RegExp(pattern));
+  }
+  assert.equal(raised, true, pattern);
+}
+
 const routine = {
   name: ' Home Routine ',
   days: [
@@ -374,6 +428,10 @@ async function seed(db: PgLike) {
 async function runBehavior(PGlite: new () => PgLike) {
   const db = new PGlite();
   await seed(db);
+  const beforePreflight = await history(db);
+  await execSql(db, readSql('program-setup-preflight.sql'));
+  await execSql(db, readSql('program-setup-postcheck.sql'));
+  assert.deepEqual(await history(db), beforePreflight);
   await execSql(db, activationSql);
   const beforeHistory = await history(db);
   const beforeShape = await programShape(db);
@@ -494,6 +552,12 @@ async function runBehavior(PGlite: new () => PgLike) {
   );
   await expectRaise(db, USER_A, saveCall({ name: '   ', days: routine.days }, false), 'invalid_import: program_name');
   await expectRaise(db, null, saveCall(routine, false), 'Not authenticated');
+  await expectSessionRaise(
+    db,
+    'SET LOCAL ROLE anon',
+    'SELECT public.activate_owned_program(1)',
+    'permission denied',
+  );
   assert.deepEqual(await programShape(db), beforeInvalid);
   assert.deepEqual(await history(db), beforeHistory);
 
@@ -554,7 +618,14 @@ async function runBehavior(PGlite: new () => PgLike) {
   assert.equal(privileges.rows[0]?.save_anon, false);
   assert.equal(privileges.rows[0]?.activate_anon, false);
   assert.equal(privileges.rows[0]?.save_public, false);
-  assert.equal(privileges.rows[0]?.security_definer, false);
+  assert.equal(privileges.rows[0]?.security_definer, true);
+  const functionOwner = await db.query<{ owner: string }>(`
+    SELECT pg_catalog.pg_get_userbyid(proowner)::text AS owner
+    FROM pg_proc
+    WHERE oid = to_regprocedure('public.save_owned_program(jsonb, boolean)')
+  `);
+  assert.notEqual(functionOwner.rows[0]?.owner, 'authenticated');
+  assert.equal(functionOwner.rows[0]?.owner, (await db.query<{ name: string }>(`SELECT CURRENT_USER::text AS name`)).rows[0]?.name);
   assert.equal(
     (await db.query<{ present: string | null }>(
       `SELECT to_regprocedure('public.save_imported_program(jsonb)')::text AS present`,
@@ -578,8 +649,10 @@ async function runBehavior(PGlite: new () => PgLike) {
       (
         to_regprocedure('public.save_owned_program(jsonb, boolean)') IS NOT NULL
         AND to_regprocedure('public.activate_owned_program(bigint)') IS NOT NULL
-        AND (SELECT prosecdef FROM owned_save) IS FALSE
-        AND (SELECT prosecdef FROM owned_activate) IS FALSE
+        AND (SELECT prosecdef FROM owned_save) IS TRUE
+        AND (SELECT prosecdef FROM owned_activate) IS TRUE
+        AND COALESCE((SELECT prosrc NOT LIKE '%syncsetrep.program_activation%' FROM owned_save), false)
+        AND COALESCE((SELECT prosrc NOT LIKE '%syncsetrep.program_activation%' FROM owned_activate), false)
         AND EXISTS (
           SELECT 1
           FROM owned_save
@@ -617,21 +690,52 @@ async function runBehavior(PGlite: new () => PgLike) {
   assert.deepEqual(await history(db), beforeHistory);
 
   await execSql(db, privilegeSql);
-  const updatePrivilege = await db.query<{ allowed: boolean }>(`
-    SELECT has_table_privilege('authenticated', 'public.programs', 'UPDATE') AS allowed
+  const updatePrivilege = await db.query<{
+    table_update: boolean;
+    name_update: boolean;
+    active_update: boolean;
+    user_update: boolean;
+    insert_allowed: boolean;
+  }>(`
+    SELECT
+      has_table_privilege('authenticated', 'public.programs', 'UPDATE') AS table_update,
+      has_column_privilege('authenticated', 'public.programs', 'name', 'UPDATE') AS name_update,
+      has_column_privilege('authenticated', 'public.programs', 'is_active', 'UPDATE') AS active_update,
+      has_column_privilege('authenticated', 'public.programs', 'user_id', 'UPDATE') AS user_update,
+      has_table_privilege('authenticated', 'public.programs', 'INSERT') AS insert_allowed
   `);
-  assert.equal(updatePrivilege.rows[0]?.allowed, true);
+  assert.equal(updatePrivilege.rows[0]?.table_update, false);
+  assert.equal(updatePrivilege.rows[0]?.name_update, true);
+  assert.equal(updatePrivilege.rows[0]?.active_update, false);
+  assert.equal(updatePrivilege.rows[0]?.user_update, false);
+  assert.equal(updatePrivilege.rows[0]?.insert_allowed, true);
+  const activeId = Number(activeBeforePrivilege.id);
   await expectRaise(
     db,
     USER_A,
-    `UPDATE public.programs SET is_active = false WHERE id = ${Number(activeBeforePrivilege.id)} RETURNING is_active`,
-    'program_activation_rpc_required',
+    `UPDATE public.programs SET is_active = false WHERE id = ${activeId} RETURNING is_active`,
+    'permission denied',
   );
   await expectRaise(
     db,
     USER_A,
-    `UPDATE public.programs SET is_active = true WHERE id = 1 RETURNING is_active`,
-    'program_activation_rpc_required',
+    `WITH config AS (
+       SELECT set_config('syncsetrep.program_activation', 'on', true) AS enabled
+     )
+     UPDATE public.programs SET is_active = false WHERE id = ${activeId} RETURNING is_active`,
+    'permission denied',
+  );
+  await expectRaise(
+    db,
+    USER_A,
+    `UPDATE public.programs SET user_id = '${USER_B}' WHERE id = ${activeId} RETURNING user_id`,
+    'permission denied',
+  );
+  await expectSessionRaise(
+    db,
+    '',
+    `UPDATE public.programs SET user_id = '${USER_B}' WHERE id = ${activeId}`,
+    'program_owner_change_forbidden',
   );
   const renamedUnderTrigger = await asUserThenRollback<{ name: string }>(
     db,
@@ -639,12 +743,26 @@ async function runBehavior(PGlite: new () => PgLike) {
     `UPDATE public.programs SET name = 'Temporary' WHERE id = 1 RETURNING name`,
   );
   assert.equal(renamedUnderTrigger[0]?.name, 'Temporary');
+  const locked = await asUserThenRollback<{ id: string | number }>(
+    db,
+    USER_A,
+    `SELECT id FROM public.programs WHERE user_id = auth.uid() AND is_active ORDER BY id FOR UPDATE`,
+  );
+  assert.equal(Number(locked[0]?.id), activeId);
   await db.exec(`INSERT INTO auth.users (id) VALUES ('55555555-5555-5555-5555-555555555555')`);
   await expectRaise(
     db,
     '55555555-5555-5555-5555-555555555555',
     `INSERT INTO public.programs (user_id, name, slug, is_active)
      VALUES ('55555555-5555-5555-5555-555555555555', 'Direct active', NULL, true)
+     RETURNING id`,
+    'program_activation_rpc_required',
+  );
+  await expectRaise(
+    db,
+    '55555555-5555-5555-5555-555555555555',
+    `INSERT INTO public.programs (user_id, name)
+     VALUES ('55555555-5555-5555-5555-555555555555', 'Default active')
      RETURNING id`,
     'program_activation_rpc_required',
   );
@@ -656,6 +774,71 @@ async function runBehavior(PGlite: new () => PgLike) {
      RETURNING id`,
   );
   assert.ok(inactiveInsert[0]?.id != null);
+  await db.exec('GRANT UPDATE (is_active) ON TABLE public.programs TO authenticated');
+  await expectRaise(
+    db,
+    USER_A,
+    `UPDATE public.programs SET is_active = false WHERE id = ${activeId} RETURNING is_active`,
+    'program_activation_rpc_required',
+  );
+  await expectRaise(
+    db,
+    USER_A,
+    `WITH config AS (
+       SELECT set_config('syncsetrep.program_activation', 'on', true) AS enabled
+     )
+     UPDATE public.programs SET is_active = false WHERE id = ${activeId} RETURNING is_active`,
+    'program_activation_rpc_required',
+  );
+  await db.exec('REVOKE UPDATE (is_active) ON TABLE public.programs FROM authenticated');
+  const canCreate = await db.query<{ allowed: boolean }>(`
+    SELECT has_schema_privilege('authenticated', 'public', 'CREATE') AS allowed
+  `);
+  if (canCreate.rows[0]?.allowed === true) {
+    let blockedEscalation = false;
+    await db.exec('BEGIN');
+    try {
+      await db.exec(`SELECT set_config('request.jwt.claim.sub', '${USER_A}', true)`);
+      await db.exec('SET LOCAL ROLE authenticated');
+      await db.query(`
+        CREATE FUNCTION public.escalate_activation()
+        RETURNS void
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = ''
+        AS $body$
+        BEGIN
+          UPDATE public.programs SET is_active = false WHERE user_id = auth.uid();
+        END;
+        $body$;
+      `);
+      try {
+        await db.query('SELECT public.escalate_activation()');
+      } catch (error) {
+        blockedEscalation = true;
+        assert.match(
+          error instanceof Error ? error.message : String(error),
+          /permission denied|program_activation_rpc_required/,
+        );
+      }
+      assert.equal(blockedEscalation, true);
+    } finally {
+      await db.exec('ROLLBACK').catch(() => undefined);
+    }
+  } else {
+    await expectSessionRaise(
+      db,
+      'SET LOCAL ROLE authenticated',
+      'CREATE FUNCTION public.escalate_activation() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$',
+      'permission denied',
+    );
+  }
+  assert.equal(
+    (await db.query<{ present: string | null }>(`
+      SELECT to_regprocedure('public.escalate_activation()')::text AS present
+    `)).rows[0]?.present ?? null,
+    null,
+  );
   const rpcActivation = await asUserThenRollback<{ id: string | number }>(
     db,
     USER_A,
@@ -668,6 +851,7 @@ async function runBehavior(PGlite: new () => PgLike) {
     saveCall({ ...routine, name: 'Triggered first' }, true),
   );
   assert.ok(firstThroughRpc[0]?.id != null);
+  await execSql(db, readSql('program-setup-postcheck.sql'));
   assert.deepEqual(await programShape(db), beforePrivilege);
   assert.deepEqual(await history(db), beforeHistory);
 

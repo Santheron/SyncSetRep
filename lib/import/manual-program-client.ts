@@ -6,6 +6,7 @@ import {
   toSavedPrograms,
   type CatalogExercise,
   type OwnedProgramRow,
+  type OwnedProgramSaveRpc,
   type SavedProgramSummary,
 } from './manual-program.ts';
 import type { ProgramReview } from './review-editor.ts';
@@ -110,17 +111,30 @@ export async function loadExerciseCatalog(io?: {
   };
 }
 
+export const OWNED_PROGRAM_RPC_ENABLED = false;
+
+async function defaultOwnedSaveRpc(args: {
+  p_program: SaveImportedProgramPayload;
+  p_make_current: true;
+}) {
+  const { supabase } = await import('../supabase.ts');
+  const result = await supabase.rpc('save_owned_program', args);
+  return { data: result.data, error: result.error };
+}
+
 export async function saveManualProgramForCurrentUser(
   review: ProgramReview,
   io?: {
     getUserId?: () => Promise<UserIdResult>;
     loadPrograms?: () => Promise<ListResult>;
     rpc?: ImportSaveRpc;
+    ownedRpc?: OwnedProgramSaveRpc;
   },
 ): Promise<SaveImportedProgramResult> {
   const getUserId = io?.getUserId ?? defaultGetUserId;
   const loadPrograms = io?.loadPrograms ?? (() => loadOwnedPrograms());
   const rpc = io?.rpc ?? defaultSaveRpc;
+  const ownedRpc = io?.ownedRpc ?? (OWNED_PROGRAM_RPC_ENABLED ? defaultOwnedSaveRpc : undefined);
   const user = await getUserId();
   if (!user.ok || user.data.trim() === '') {
     return { ok: false, errors: [MANUAL_SIGN_IN_SAVE_MESSAGE] };
@@ -133,6 +147,7 @@ export async function saveManualProgramForCurrentUser(
     userId: user.data,
     programs: programs.data,
     rpc,
+    ownedRpc,
   });
   if (!saved.ok) {
     return { ok: false, errors: manualSaveErrors(saved.errors) };
