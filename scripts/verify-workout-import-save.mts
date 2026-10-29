@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { IMPORT_ENABLED, PERSIST_REST_SECONDS, SUBTITLE_REQUIRED } from '../lib/import/flags.ts';
+import { TEXT_FIELD_MAX } from '../lib/import/limits.ts';
 import {
   assertImportStaysInactive,
   buildImportInsertPlan,
@@ -17,6 +18,7 @@ import {
   IMPORT_PROGRAM_NAME_MESSAGE,
   IMPORT_REST_RANGE_MESSAGE,
   IMPORT_SLUG_MESSAGE,
+  IMPORT_SUBTITLE_LENGTH_MESSAGE,
   IMPORT_UNACCEPTED_REPS_MESSAGE,
   IMPORT_UNACCEPTED_SETS_MESSAGE,
   IMPORT_UNRESOLVED_EXERCISE_MESSAGE,
@@ -290,6 +292,35 @@ assert.deepEqual(
   errorsOf(buildImportInsertPlan(preview(), USER_ID, { hasActiveProgram: true, subtitleRequired: true })),
   [IMPORT_BLANK_SUBTITLE_MESSAGE],
 );
+
+const longSubtitle = preview();
+const longSubtitleDay = longSubtitle.days[0];
+if (!longSubtitleDay) {
+  throw new Error('preview day missing');
+}
+longSubtitleDay.subtitle = 's'.repeat(TEXT_FIELD_MAX + 1);
+assert.deepEqual(errorsOf(buildImportInsertPlan(longSubtitle, USER_ID, { hasActiveProgram: true })), [
+  IMPORT_SUBTITLE_LENGTH_MESSAGE,
+]);
+
+const maxSubtitle = preview();
+const maxSubtitleDay = maxSubtitle.days[0];
+if (!maxSubtitleDay) {
+  throw new Error('preview day missing');
+}
+maxSubtitleDay.subtitle = 's'.repeat(TEXT_FIELD_MAX);
+const maxSubtitlePlan = planOf(buildImportInsertPlan(maxSubtitle, USER_ID, { hasActiveProgram: true }));
+assert.equal(maxSubtitlePlan.days[0]?.subtitle?.length, TEXT_FIELD_MAX);
+
+const restDay = preview();
+const restDayRow = restDay.days[1];
+if (!restDayRow) {
+  throw new Error('preview day missing');
+}
+restDayRow.exercises = [];
+const restDayPlan = planOf(buildImportInsertPlan(restDay, USER_ID, { hasActiveProgram: true }));
+assert.equal(restDayPlan.days[1]?.program_exercises.length, 0);
+assert.equal(restDayPlan.days[1]?.day_order, 2);
 
 const slugRefused = errorsOf(
   buildImportInsertPlan(preview(), USER_ID, { hasActiveProgram: true, slugRequired: true }),

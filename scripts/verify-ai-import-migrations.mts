@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
 import { IMPORT_ENABLED, PERSIST_REST_SECONDS, SUBTITLE_REQUIRED } from '../lib/import/flags.ts';
+import { TEXT_FIELD_MAX } from '../lib/import/limits.ts';
 
 const require = createRequire(import.meta.url);
 
@@ -45,13 +46,19 @@ assert.match(files.preflight, /GROUP BY program_id, day_order/);
 
 const dayOrderSql = stripSql(files.dayOrder);
 assert.match(dayOrderSql, /UNIQUE NULLS NOT DISTINCT \(program_id, day_order\)/);
+assert.match(dayOrderSql, /program_days_day_order_key/);
+assert.match(dayOrderSql, /indnullsnotdistinct/);
+assert.match(dayOrderSql, /program_day_order_schema/);
 assert.match(dayOrderSql, /program_day_order_duplicates/);
+assert.equal(/\bdrop\s+index\b/i.test(dayOrderSql), false);
 assert.equal(/\b(insert|update|delete)\b/i.test(dayOrderSql), false);
 
 const dayOrderRollbackSql = stripSql(files.dayOrderRollback);
 assert.match(dayOrderRollbackSql, /day_order_rollback_blocked/);
+assert.match(dayOrderRollbackSql, /day_order_rollback_schema/);
+assert.match(dayOrderRollbackSql, /DROP CONSTRAINT program_days_program_id_day_order_key/);
 assert.match(dayOrderRollbackSql, /UNIQUE \(day_order\)/);
-assert.equal(/\b(insert|update|delete from)\b/i.test(dayOrderRollbackSql), false);
+assert.equal(/\b(insert|update|delete)\b/i.test(dayOrderRollbackSql), false);
 
 const saveSql = stripSql(files.save);
 assert.match(saveSql, /SECURITY INVOKER/);
@@ -62,6 +69,8 @@ assert.match(saveSql, /FOR UPDATE/);
 assert.match(saveSql, /invalid_import: inverted_reps/);
 assert.match(saveSql, /active_program_required/);
 assert.match(saveSql, /VALUES \(uid, program_name, NULL, false\)/);
+assert.match(saveSql, new RegExp(`char_length\\(day_subtitle\\) > ${TEXT_FIELD_MAX}`));
+assert.match(saveSql, /9223372036854775807/);
 assert.equal(/\bsecurity definer\b/i.test(saveSql), false);
 assert.equal(/\bupdate\s+(public|only)\b/i.test(saveSql), false);
 assert.equal(/\bdelete\s+from\b/i.test(saveSql), false);
@@ -112,7 +121,7 @@ CREATE TABLE public.program_days (
   name text NOT NULL,
   subtitle text,
   day_order integer NOT NULL,
-  CONSTRAINT program_days_day_order_global UNIQUE (day_order)
+  CONSTRAINT program_days_day_order_key UNIQUE (day_order)
 );
 
 CREATE TABLE public.exercises (
@@ -277,34 +286,145 @@ async function seedBase(db: PgLike) {
     INSERT INTO public.program_days (program_id, name, subtitle, day_order)
     VALUES (1, 'Current day', NULL, 1);
     INSERT INTO public.workout_sessions (user_id, finished_at)
-    VALUES ('${USER_A}', now());
+    SELECT '${USER_A}', timestamptz '2026-01-01T00:00:00Z' + (n || ' days')::interval
+    FROM generate_series(1, 30) AS n;
     INSERT INTO public.workout_sets (workout_session_id, exercise_id, reps)
-    VALUES (1, 1, 8);
+    SELECT id, 1, 8 FROM public.workout_sessions ORDER BY id;
   `);
+}
+
+function schemaWith(constraintSql: string) {
+  return fixtureSql.replace(
+    'CONSTRAINT program_days_day_order_key UNIQUE (day_order)',
+    constraintSql,
+  );
+}
+
+async function preservedRows(db: PgLike) {
+  const active = await db.query<{
+    id: number;
+    user_id: string;
+    name: string;
+    slug: string | null;
+    is_active: boolean;
+  }>(`
+    SELECT id, user_id::text AS user_id, name, slug, is_active
+    FROM public.programs
+    WHERE id = 1
+  `);
+  const originalDay = await db.query<{
+    id: number;
+    program_id: number;
+    name: string;
+    subtitle: string | null;
+    day_order: number;
+  }>(`
+    SELECT id, program_id, name, subtitle, day_order
+    FROM public.program_days
+    WHERE id = 1
+  `);
+  const sessions = await db.query<{ id: number; user_id: string; finished_at: string }>(`
+    SELECT id, user_id::text AS user_id, finished_at::text AS finished_at
+    FROM public.workout_sessions
+    ORDER BY id
+  `);
+  const sets = await db.query<{
+    id: number;
+    workout_session_id: number;
+    exercise_id: number;
+    reps: number;
+  }>(`
+    SELECT id, workout_session_id, exercise_id, reps
+    FROM public.workout_sets
+    ORDER BY id
+  `);
+  return {
+    active: active.rows,
+    originalDay: originalDay.rows,
+    sessions: sessions.rows,
+    sets: sets.rows,
+  };
+}
+
+function assertHistoryUntouched(
+  current: Awaited<ReturnType<typeof preservedRows>>,
+  expected: Awaited<ReturnType<typeof preservedRows>>,
+) {
+  assert.equal(current.sessions.length, 30);
+  assert.equal(current.sets.length, 30);
+  assert.equal(current.sessions.every((row) => row.finished_at.length > 0), true);
+  assert.equal(current.active[0]?.is_active, true);
+  assert.equal(current.active[0]?.name, 'Current');
+  assert.equal(current.originalDay[0]?.day_order, 1);
+  assert.deepEqual(current, expected);
+}
+
+async function pairConstraint(db: PgLike) {
+  const rows = await db.query<{ nulls_not_distinct: boolean; columns: string }>(`
+    SELECT
+      ix.indnullsnotdistinct AS nulls_not_distinct,
+      (
+        SELECT array_to_string(array_agg(att.attname ORDER BY key.ord), ',')
+        FROM unnest(ix.indkey) WITH ORDINALITY AS key(attnum, ord)
+        JOIN pg_attribute att
+          ON att.attrelid = ix.indrelid
+         AND att.attnum = key.attnum
+        WHERE key.ord <= ix.indnkeyatts
+          AND key.attnum > 0
+      ) AS columns
+    FROM pg_constraint con
+    JOIN pg_index ix ON ix.indexrelid = con.conindid
+    WHERE con.conname = 'program_days_program_id_day_order_key'
+  `);
+  return rows.rows[0];
+}
+
+async function expectFileRaise(db: PgLike, name: string, pattern: string) {
+  let raised = false;
+  try {
+    await execFile(db, name);
+  } catch (error) {
+    raised = true;
+    const message = error instanceof Error ? error.message : String(error);
+    assert.match(message, new RegExp(pattern));
+    assert.equal(/out of range/i.test(message), false);
+  }
+  assert.equal(raised, true);
 }
 
 async function runBehavior(PGlite: new () => PgLike) {
   const db = new PGlite();
   await seedBase(db);
-  const beforeDays = await db.query<{ id: number; day_order: number }>(
-    'SELECT id, day_order FROM public.program_days ORDER BY id',
-  );
+  const beforeDays = await db.query<{
+    id: number;
+    program_id: number;
+    name: string;
+    subtitle: string | null;
+    day_order: number;
+  }>('SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id');
   const beforeHistory = await db.query<{ sessions: number; sets: number }>(`
     SELECT
       (SELECT count(*)::int FROM public.workout_sessions) AS sessions,
       (SELECT count(*)::int FROM public.workout_sets) AS sets
   `);
+  const preserved = await preservedRows(db);
+  assert.equal(beforeHistory.rows[0]?.sessions, 30);
+  assert.equal(beforeHistory.rows[0]?.sets, 30);
   await execFile(db, 'ai-import-day-order.sql');
-  const afterDays = await db.query<{ id: number; day_order: number }>(
-    'SELECT id, day_order FROM public.program_days ORDER BY id',
+  assert.deepEqual(
+    (await db.query('SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id')).rows,
+    beforeDays.rows,
   );
-  assert.deepEqual(afterDays.rows, beforeDays.rows);
-  const afterHistory = await db.query<{ sessions: number; sets: number }>(`
-    SELECT
-      (SELECT count(*)::int FROM public.workout_sessions) AS sessions,
-      (SELECT count(*)::int FROM public.workout_sets) AS sets
-  `);
-  assert.deepEqual(afterHistory.rows, beforeHistory.rows);
+  assertHistoryUntouched(await preservedRows(db), preserved);
+  const replacement = await pairConstraint(db);
+  assert.equal(replacement?.nulls_not_distinct, true);
+  assert.equal(replacement?.columns, 'program_id,day_order');
+  await execFile(db, 'ai-import-day-order.sql');
+  assert.deepEqual(
+    (await db.query('SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id')).rows,
+    beforeDays.rows,
+  );
+  assertHistoryUntouched(await preservedRows(db), preserved);
   const exerciseInsert = await db.query<{ allowed: boolean }>(
     `SELECT has_table_privilege('authenticated', 'public.exercises', 'INSERT') AS allowed`,
   );
@@ -316,6 +436,33 @@ async function runBehavior(PGlite: new () => PgLike) {
     INSERT INTO public.program_days (program_id, name, subtitle, day_order)
     VALUES (2, 'Second day', NULL, 1);
   `);
+  const sharedDays = await db.query(
+    'SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id',
+  );
+  await execFile(db, 'ai-import-day-order.sql');
+  assert.deepEqual(
+    (await db.query('SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id')).rows,
+    sharedDays.rows,
+  );
+  assertHistoryUntouched(await preservedRows(db), preserved);
+  await db.exec(`
+    INSERT INTO public.program_days (program_id, name, subtitle, day_order)
+    VALUES (NULL, 'Unowned', NULL, 1);
+  `);
+  let repeatedNullProgramRejected = false;
+  try {
+    await db.exec(`
+      INSERT INTO public.program_days (program_id, name, subtitle, day_order)
+      VALUES (NULL, 'Unowned again', NULL, 1);
+    `);
+  } catch (error) {
+    repeatedNullProgramRejected = true;
+    assert.match(
+      error instanceof Error ? error.message : String(error),
+      /program_days_program_id_day_order_key|duplicate key/,
+    );
+  }
+  assert.equal(repeatedNullProgramRejected, true);
   const preflight = await db.query<{ day_order_preflight: string }>(readSql('ai-import-day-order-preflight.sql'));
   const preflightJson = JSON.parse(preflight.rows[0]?.day_order_preflight ?? '{}') as {
     duplicate_groups: number;
@@ -352,10 +499,7 @@ async function runBehavior(PGlite: new () => PgLike) {
   `);
   assert.equal(dayRows.rows.length >= 2, true);
   assert.equal(dayRows.rows.some((row) => row.program_id === savedId && row.name === 'Day 1' && row.subtitle === 'Push'), true);
-  assert.deepEqual(
-    (await db.query('SELECT id, day_order FROM public.program_days WHERE id = 1')).rows,
-    beforeDays.rows,
-  );
+  assertHistoryUntouched(await preservedRows(db), preserved);
   assert.deepEqual(
     (await db.query(`
       SELECT
@@ -415,28 +559,147 @@ async function runBehavior(PGlite: new () => PgLike) {
   );
   assert.equal(ownerRows.rows.length, 0);
 
-  let rollbackBlocked = false;
-  try {
-    await execFile(db, 'ai-import-day-order-rollback.sql');
-  } catch (error) {
-    rollbackBlocked = true;
-    assert.match(error instanceof Error ? error.message : String(error), /day_order_rollback_blocked/);
-  }
-  assert.equal(rollbackBlocked, true);
-  const pairConstraint = await db.query<{ name: string | null }>(`
-    SELECT conname AS name
-    FROM pg_constraint
-    WHERE conname = 'program_days_program_id_day_order_key'
+  const beforeOverflow = await db.query<{ programs: number; days: number; sets: number }>(`
+    SELECT
+      (SELECT count(*)::int FROM public.programs) AS programs,
+      (SELECT count(*)::int FROM public.program_days) AS days,
+      (SELECT count(*)::int FROM public.workout_sets) AS sets
   `);
-  assert.equal(pairConstraint.rows[0]?.name, 'program_days_program_id_day_order_key');
-  assert.deepEqual(
-    (await db.query('SELECT id, day_order FROM public.program_days WHERE id = 1')).rows,
-    beforeDays.rows,
+  const restProgram = JSON.stringify({
+    name: 'Rest week',
+    days: [
+      { name: 'Rest', subtitle: '   ', exercises: [] },
+      {
+        name: 'Lift',
+        subtitle: 'S'.repeat(TEXT_FIELD_MAX),
+        exercises: [
+          { exercise_id: '1', target_sets: '0003', min_reps: '0008', max_reps: '00012', notes: null },
+        ],
+      },
+    ],
+  });
+  const restSaved = await asUser<{ id: number }>(db, USER_A, payload(restProgram));
+  const restId = Number(restSaved[0]?.id);
+  const restDays = await db.query<{ name: string; subtitle: string | null; day_order: number; exercises: number }>(`
+    SELECT d.name, d.subtitle, d.day_order, count(e.id)::int AS exercises
+    FROM public.program_days d
+    LEFT JOIN public.program_exercises e ON e.program_day_id = d.id
+    WHERE d.program_id = ${restId}
+    GROUP BY d.id, d.name, d.subtitle, d.day_order
+    ORDER BY d.day_order
+  `);
+  assert.deepEqual(restDays.rows, [
+    { name: 'Rest', subtitle: null, day_order: 1, exercises: 0 },
+    { name: 'Lift', subtitle: 'S'.repeat(TEXT_FIELD_MAX), day_order: 2, exercises: 1 },
+  ]);
+  const paddedSets = await db.query<{ target_sets: number; min_reps: number; max_reps: number }>(`
+    SELECT target_sets, min_reps, max_reps
+    FROM public.program_exercises e
+    JOIN public.program_days d ON d.id = e.program_day_id
+    WHERE d.program_id = ${restId}
+  `);
+  assert.deepEqual(paddedSets.rows, [{ target_sets: 3, min_reps: 8, max_reps: 12 }]);
+
+  await expectRaise(
+    db,
+    USER_A,
+    payload(JSON.stringify({
+      name: 'Long subtitle',
+      days: [{ name: 'Day', subtitle: 'S'.repeat(TEXT_FIELD_MAX + 1), exercises: [] }],
+    })),
+    'invalid_import: subtitle',
   );
+  let setsOverflow = false;
+  try {
+    await asUser(
+      db,
+      USER_A,
+      payload(
+        '{"name":"Huge sets","days":[{"name":"Day","exercises":[{"exercise_id":1,"target_sets":99999999999999999999,"min_reps":8,"max_reps":12}]}]}',
+      ),
+    );
+  } catch (error) {
+    setsOverflow = true;
+    const message = error instanceof Error ? error.message : String(error);
+    assert.match(message, /invalid_import: sets/);
+    assert.equal(/out of range/i.test(message), false);
+  }
+  assert.equal(setsOverflow, true);
+  let idOverflow = false;
+  try {
+    await asUser(
+      db,
+      USER_A,
+      payload(JSON.stringify({
+        name: 'Huge id',
+        days: [{
+          name: 'Day',
+          exercises: [{
+            exercise_id: '9223372036854775808',
+            target_sets: 3,
+            min_reps: 8,
+            max_reps: 12,
+          }],
+        }],
+      })),
+    );
+  } catch (error) {
+    idOverflow = true;
+    const message = error instanceof Error ? error.message : String(error);
+    assert.match(message, /invalid_import: exercise_id/);
+    assert.equal(/out of range/i.test(message), false);
+  }
+  assert.equal(idOverflow, true);
+  await expectRaise(
+    db,
+    USER_A,
+    payload(JSON.stringify({
+      name: 'Max bigint',
+      days: [{
+        name: 'Day',
+        exercises: [{
+          exercise_id: '9223372036854775807',
+          target_sets: 3,
+          min_reps: 8,
+          max_reps: 12,
+        }],
+      }],
+    })),
+    'unknown_exercise',
+  );
+  const afterOverflow = await db.query<{ programs: number; days: number; sets: number }>(`
+    SELECT
+      (SELECT count(*)::int FROM public.programs) AS programs,
+      (SELECT count(*)::int FROM public.program_days) AS days,
+      (SELECT count(*)::int FROM public.workout_sets) AS sets
+  `);
+  assert.equal(afterOverflow.rows[0]?.programs, (beforeOverflow.rows[0]?.programs ?? 0) + 1);
+  assert.equal(afterOverflow.rows[0]?.days, (beforeOverflow.rows[0]?.days ?? 0) + 2);
+  assert.equal(afterOverflow.rows[0]?.sets, beforeOverflow.rows[0]?.sets);
+  assertHistoryUntouched(await preservedRows(db), preserved);
+
+  const daysBeforeRollback = await db.query(
+    'SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id',
+  );
+  await expectFileRaise(db, 'ai-import-day-order-rollback.sql', 'day_order_rollback_blocked');
+  await expectFileRaise(db, 'ai-import-day-order-rollback.sql', 'day_order_rollback_blocked');
+  assert.deepEqual(
+    (await db.query('SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id')).rows,
+    daysBeforeRollback.rows,
+  );
+  const keptPair = await pairConstraint(db);
+  assert.equal(keptPair?.nulls_not_distinct, true);
+  assert.equal(keptPair?.columns, 'program_id,day_order');
+  assertHistoryUntouched(await preservedRows(db), preserved);
 
   const clean = new PGlite();
   await seedBase(clean);
+  const cleanPreserved = await preservedRows(clean);
+  const cleanDays = await clean.query(
+    'SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id',
+  );
   await execFile(clean, 'ai-import-day-order.sql');
+  await execFile(clean, 'ai-import-day-order-rollback.sql');
   await execFile(clean, 'ai-import-day-order-rollback.sql');
   const restored = await clean.query<{ name: string }>(`
     SELECT conname AS name
@@ -445,6 +708,10 @@ async function runBehavior(PGlite: new () => PgLike) {
       AND contype = 'u'
   `);
   assert.equal(restored.rows.some((row) => row.name === 'program_days_day_order_key'), true);
+  assert.equal(
+    (await clean.query(`SELECT 1 FROM pg_constraint WHERE conname = 'program_days_program_id_day_order_key'`)).rows.length,
+    0,
+  );
   let globalUniqueHeld = false;
   try {
     await clean.exec(`
@@ -459,9 +726,77 @@ async function runBehavior(PGlite: new () => PgLike) {
   }
   assert.equal(globalUniqueHeld, true);
   assert.deepEqual(
-    (await clean.query('SELECT id, day_order FROM public.program_days ORDER BY id')).rows,
-    beforeDays.rows,
+    (await clean.query('SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id')).rows,
+    cleanDays.rows,
   );
+  assertHistoryUntouched(await preservedRows(clean), cleanPreserved);
+
+  const wrongName = new PGlite();
+  await wrongName.exec(schemaWith('CONSTRAINT program_days_day_order_global UNIQUE (day_order)'));
+  await wrongName.exec(`
+    INSERT INTO auth.users (id) VALUES ('${USER_A}');
+    INSERT INTO public.exercises (name) VALUES ('Dumbbell Bench Press');
+    INSERT INTO public.programs (user_id, name, slug, is_active)
+    VALUES ('${USER_A}', 'Current', NULL, true);
+    INSERT INTO public.program_days (program_id, name, subtitle, day_order)
+    VALUES (1, 'Current day', NULL, 1);
+  `);
+  const wrongDays = await wrongName.query(
+    'SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id',
+  );
+  await expectFileRaise(wrongName, 'ai-import-day-order.sql', 'program_day_order_schema');
+  assert.deepEqual(
+    (await wrongName.query('SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id')).rows,
+    wrongDays.rows,
+  );
+  assert.equal(
+    (await wrongName.query(`SELECT 1 FROM pg_constraint WHERE conname = 'program_days_day_order_global'`)).rows.length,
+    1,
+  );
+
+  const wrongNulls = new PGlite();
+  await wrongNulls.exec(schemaWith('CONSTRAINT program_days_day_order_key UNIQUE NULLS NOT DISTINCT (day_order)'));
+  await wrongNulls.exec(`
+    INSERT INTO auth.users (id) VALUES ('${USER_A}');
+    INSERT INTO public.programs (user_id, name, slug, is_active)
+    VALUES ('${USER_A}', 'Current', NULL, true);
+    INSERT INTO public.program_days (program_id, name, subtitle, day_order)
+    VALUES (1, 'Current day', NULL, 1);
+  `);
+  await expectFileRaise(wrongNulls, 'ai-import-day-order.sql', 'program_day_order_schema');
+  const stillSingle = await wrongNulls.query<{ nulls_not_distinct: boolean }>(`
+    SELECT ix.indnullsnotdistinct AS nulls_not_distinct
+    FROM pg_constraint con
+    JOIN pg_index ix ON ix.indexrelid = con.conindid
+    WHERE con.conname = 'program_days_day_order_key'
+  `);
+  assert.equal(stillSingle.rows[0]?.nulls_not_distinct, true);
+
+  const wrongPair = new PGlite();
+  await seedBase(wrongPair);
+  await execFile(wrongPair, 'ai-import-day-order.sql');
+  await wrongPair.exec(`
+    ALTER TABLE public.program_days DROP CONSTRAINT program_days_program_id_day_order_key;
+    ALTER TABLE public.program_days
+      ADD CONSTRAINT program_days_program_id_day_order_key
+      UNIQUE (program_id, day_order);
+  `);
+  const wrongPairDays = await wrongPair.query(
+    'SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id',
+  );
+  await expectFileRaise(wrongPair, 'ai-import-day-order.sql', 'program_day_order_schema');
+  await expectFileRaise(wrongPair, 'ai-import-day-order-rollback.sql', 'day_order_rollback_schema');
+  assert.deepEqual(
+    (await wrongPair.query('SELECT id, program_id, name, subtitle, day_order FROM public.program_days ORDER BY id')).rows,
+    wrongPairDays.rows,
+  );
+  const wrongPairFlag = await wrongPair.query<{ nulls_not_distinct: boolean }>(`
+    SELECT ix.indnullsnotdistinct AS nulls_not_distinct
+    FROM pg_constraint con
+    JOIN pg_index ix ON ix.indexrelid = con.conindid
+    WHERE con.conname = 'program_days_program_id_day_order_key'
+  `);
+  assert.equal(wrongPairFlag.rows[0]?.nulls_not_distinct, false);
 
   const quotaDb = new PGlite();
   await quotaDb.exec(fixtureSql);

@@ -12,6 +12,7 @@ import {
   REST_MIN,
   SETS_MAX,
   SETS_MIN,
+  TEXT_FIELD_MAX,
 } from './limits.ts';
 
 export type Acceptance = 'extracted' | 'accepted_suggestion' | 'user_entered' | 'missing';
@@ -119,6 +120,9 @@ export const IMPORT_REST_RANGE_MESSAGE =
 
 export const IMPORT_BLANK_SUBTITLE_MESSAGE =
   'Enter a subtitle for every day before saving. Nothing was saved.';
+
+export const IMPORT_SUBTITLE_LENGTH_MESSAGE =
+  `Enter a subtitle of ${TEXT_FIELD_MAX} characters or fewer before saving. Nothing was saved.`;
 
 export const IMPORT_PROGRAM_NAME_MESSAGE =
   'Enter a program name of 1 to 80 characters before saving. Nothing was saved.';
@@ -255,6 +259,9 @@ export function buildImportInsertPlan(
     const subtitle = emptyToNull(day.subtitle);
     if (subtitleRequired && subtitle == null) {
       push(errors, IMPORT_BLANK_SUBTITLE_MESSAGE);
+    }
+    if (subtitle != null && subtitle.length > TEXT_FIELD_MAX) {
+      push(errors, IMPORT_SUBTITLE_LENGTH_MESSAGE);
     }
 
     const exercises = Array.isArray(day.exercises) ? day.exercises : [];
