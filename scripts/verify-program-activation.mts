@@ -45,6 +45,24 @@ assert.match(activationBody, /active_program_count/);
 assert.match(activationBody, /program_not_found/);
 assert.match(activationBody, /FOR UPDATE/);
 assert.match(activationBody, /VALUES \(uid, program_name, NULL, make_current\)/);
+assert.match(activationBody, /syncsetrep\.program_activation/);
+
+const privilegeSql = readSql('program-activation-privilege.sql');
+const privilegeRollbackSql = readSql('program-activation-privilege-rollback.sql');
+const privilegeBody = stripSql(privilegeSql);
+const privilegeRollbackBody = stripSql(privilegeRollbackSql);
+assert.equal(privilegeSql.includes('workout_sessions'), false);
+assert.equal(privilegeSql.includes('workout_sets'), false);
+assert.equal(privilegeRollbackSql.includes('workout_sessions'), false);
+assert.equal(privilegeRollbackSql.includes('workout_sets'), false);
+assert.equal(privilegeBody.includes('copy_starter'), false);
+assert.equal(privilegeBody.includes('save_imported_program'), false);
+assert.match(privilegeBody, /program_activation_rpc_required/);
+assert.match(privilegeBody, /syncsetrep\.program_activation/);
+assert.match(privilegeBody, /GRANT EXECUTE ON FUNCTION public\.enforce_program_activation\(\) TO authenticated/);
+assert.match(privilegeRollbackBody, /DROP TRIGGER IF EXISTS programs_activation_rpc ON public\.programs/);
+assert.match(privilegeRollbackBody, /DROP FUNCTION IF EXISTS public\.enforce_program_activation\(\)/);
+assert.equal(/\b(insert|update|delete)\s+/i.test(privilegeRollbackBody), false);
 assert.equal(/\bdelete\s+from\b/i.test(activationBody), false);
 assert.equal(/update\s+public\.program_days\b/i.test(activationBody), false);
 assert.equal(/update\s+public\.program_exercises\b/i.test(activationBody), false);
@@ -227,6 +245,24 @@ async function asUser<T extends Record<string, unknown>>(db: PgLike, userId: str
     await db.exec('SET LOCAL ROLE authenticated');
     const result = await db.query<T>(sql);
     await db.exec('COMMIT');
+    return result.rows;
+  } catch (error) {
+    await db.exec('ROLLBACK').catch(() => undefined);
+    throw error;
+  }
+}
+
+async function asUserThenRollback<T extends Record<string, unknown>>(
+  db: PgLike,
+  userId: string,
+  sql: string,
+) {
+  await db.exec('BEGIN');
+  try {
+    await db.exec(`SELECT set_config('request.jwt.claim.sub', '${userId}', true)`);
+    await db.exec('SET LOCAL ROLE authenticated');
+    const result = await db.query<T>(sql);
+    await db.exec('ROLLBACK');
     return result.rows;
   } catch (error) {
     await db.exec('ROLLBACK').catch(() => undefined);
@@ -479,6 +515,17 @@ async function runBehavior(PGlite: new () => PgLike) {
   assert.equal(shape.programs.filter((row) => row.user_id === USER_A && row.is_active === true).length, 1);
   assert.deepEqual(await history(db), beforeHistory);
 
+  const nullSaved = await asUser<{ id: string | number }>(
+    db,
+    USER_A,
+    `SELECT public.save_owned_program(${quoteLiteral(JSON.stringify({ ...routine, name: 'Null Current' }))}::jsonb, NULL) AS id`,
+  );
+  const nullSavedId = Number(nullSaved[0]?.id);
+  shape = await programShape(db);
+  assert.equal(shape.programs.find((row) => row.id === nullSavedId)?.is_active, false);
+  assert.equal(shape.programs.filter((row) => row.user_id === USER_A && row.is_active === true).length, 1);
+  assert.deepEqual(await history(db), beforeHistory);
+
   const privileges = await db.query<{
     save_authenticated: boolean;
     activate_authenticated: boolean;
@@ -548,6 +595,97 @@ async function runBehavior(PGlite: new () => PgLike) {
       ) AS post_activation_functions_ok
   `);
   assert.equal(verified.rows[0]?.post_activation_functions_ok, true);
+
+  const beforePrivilege = await programShape(db);
+  const activeBeforePrivilege = beforePrivilege.programs.find(
+    (row) => row.user_id === USER_A && row.is_active === true,
+  );
+  assert.ok(activeBeforePrivilege);
+  const directClear = await asUserThenRollback<{ is_active: boolean }>(
+    db,
+    USER_A,
+    `UPDATE public.programs SET is_active = false WHERE id = ${Number(activeBeforePrivilege.id)} RETURNING is_active`,
+  );
+  assert.equal(directClear[0]?.is_active, false);
+  const directRename = await asUserThenRollback<{ name: string }>(
+    db,
+    USER_A,
+    `UPDATE public.programs SET name = 'Temporary' WHERE id = 1 RETURNING name`,
+  );
+  assert.equal(directRename[0]?.name, 'Temporary');
+  assert.deepEqual(await programShape(db), beforePrivilege);
+  assert.deepEqual(await history(db), beforeHistory);
+
+  await execSql(db, privilegeSql);
+  const updatePrivilege = await db.query<{ allowed: boolean }>(`
+    SELECT has_table_privilege('authenticated', 'public.programs', 'UPDATE') AS allowed
+  `);
+  assert.equal(updatePrivilege.rows[0]?.allowed, true);
+  await expectRaise(
+    db,
+    USER_A,
+    `UPDATE public.programs SET is_active = false WHERE id = ${Number(activeBeforePrivilege.id)} RETURNING is_active`,
+    'program_activation_rpc_required',
+  );
+  await expectRaise(
+    db,
+    USER_A,
+    `UPDATE public.programs SET is_active = true WHERE id = 1 RETURNING is_active`,
+    'program_activation_rpc_required',
+  );
+  const renamedUnderTrigger = await asUserThenRollback<{ name: string }>(
+    db,
+    USER_A,
+    `UPDATE public.programs SET name = 'Temporary' WHERE id = 1 RETURNING name`,
+  );
+  assert.equal(renamedUnderTrigger[0]?.name, 'Temporary');
+  await db.exec(`INSERT INTO auth.users (id) VALUES ('55555555-5555-5555-5555-555555555555')`);
+  await expectRaise(
+    db,
+    '55555555-5555-5555-5555-555555555555',
+    `INSERT INTO public.programs (user_id, name, slug, is_active)
+     VALUES ('55555555-5555-5555-5555-555555555555', 'Direct active', NULL, true)
+     RETURNING id`,
+    'program_activation_rpc_required',
+  );
+  const inactiveInsert = await asUserThenRollback<{ id: string | number }>(
+    db,
+    '55555555-5555-5555-5555-555555555555',
+    `INSERT INTO public.programs (user_id, name, slug, is_active)
+     VALUES ('55555555-5555-5555-5555-555555555555', 'Direct inactive', NULL, false)
+     RETURNING id`,
+  );
+  assert.ok(inactiveInsert[0]?.id != null);
+  const rpcActivation = await asUserThenRollback<{ id: string | number }>(
+    db,
+    USER_A,
+    `SELECT public.activate_owned_program(1) AS id`,
+  );
+  assert.equal(Number(rpcActivation[0]?.id), 1);
+  const firstThroughRpc = await asUserThenRollback<{ id: string | number }>(
+    db,
+    '55555555-5555-5555-5555-555555555555',
+    saveCall({ ...routine, name: 'Triggered first' }, true),
+  );
+  assert.ok(firstThroughRpc[0]?.id != null);
+  assert.deepEqual(await programShape(db), beforePrivilege);
+  assert.deepEqual(await history(db), beforeHistory);
+
+  await execSql(db, privilegeRollbackSql);
+  const clearedAgain = await asUserThenRollback<{ is_active: boolean }>(
+    db,
+    USER_A,
+    `UPDATE public.programs SET is_active = false WHERE id = ${Number(activeBeforePrivilege.id)} RETURNING is_active`,
+  );
+  assert.equal(clearedAgain[0]?.is_active, false);
+  assert.equal(
+    (await db.query<{ present: string | null }>(`
+      SELECT to_regprocedure('public.enforce_program_activation()')::text AS present
+    `)).rows[0]?.present ?? null,
+    null,
+  );
+  assert.deepEqual(await programShape(db), beforePrivilege);
+  assert.deepEqual(await history(db), beforeHistory);
 
   const preservedHistory = await history(db);
   const preservedPrograms = await programShape(db);

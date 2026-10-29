@@ -20,20 +20,30 @@ import {
   hasCurrentProgram,
   MANUAL_NO_ACTIVE_PROGRAM_MESSAGE,
   MANUAL_REPS_MESSAGE,
+  MANUAL_SAVE_ONCE_MESSAGE,
   MANUAL_SETS_MESSAGE,
+  MANUAL_SIGN_IN_LIST_MESSAGE,
+  MANUAL_SIGN_IN_SAVE_MESSAGE,
+  MANUAL_SIGN_IN_SWITCH_MESSAGE,
+  requestProgramSwitch,
   saveManualProgram,
   savedProgramListItems,
   toSavedPrograms,
+  UNFINISHED_WORKOUT_SWITCH_MESSAGE,
+  VIEW_SAVED_PROGRAMS_LABEL,
   type ManualEdit,
   type SavedProgramSummary,
 } from '../lib/import/manual-program.ts';
 import {
+  ACTIVATION_RPC_ENABLED,
+  PROGRAM_SWITCH_UNAVAILABLE_MESSAGE,
+  activateOwnedProgramForCurrentUser,
   loadExerciseCatalog,
   loadOwnedPrograms,
   saveManualProgramForCurrentUser,
 } from '../lib/import/manual-program-client.ts';
 import { createManualProgramReview, type ProgramReview } from '../lib/import/review-editor.ts';
-import { IMPORT_CAPACITY_MESSAGE } from '../lib/import/save-plan.ts';
+import { IMPORT_CAPACITY_MESSAGE, IMPORT_SIGN_IN_MESSAGE } from '../lib/import/save-plan.ts';
 import type { ImportSaveRpc } from '../lib/import/save-imported-program.ts';
 
 const USER_ID = '11111111-1111-1111-1111-111111111111';
@@ -318,7 +328,24 @@ try {
     listed.map((item) => item.statusLabel),
     ['Current program', 'Saved program'],
   );
-  assert.equal(listed.every((item) => item.canActivate === false), true);
+  assert.equal(listed[0]?.offerSwitch, false);
+  assert.equal(listed[1]?.offerSwitch, true);
+  const switchPrompt = requestProgramSwitch(
+    [currentProgram, { id: '8', name: 'Off season', isActive: false }],
+    '8',
+  );
+  assert.equal(switchPrompt.ok, true);
+  if (switchPrompt.ok) {
+    assert.equal(switchPrompt.prompt.title, 'Use Off season as your current program?');
+    assert.equal(switchPrompt.prompt.body, UNFINISHED_WORKOUT_SWITCH_MESSAGE);
+    assert.equal(switchPrompt.prompt.confirmLabel, 'Use this routine');
+    assert.equal(switchPrompt.prompt.cancelLabel, 'Keep the current program');
+    assert.match(switchPrompt.prompt.body, /original day/);
+  }
+  const currentSwitch = requestProgramSwitch([currentProgram], currentProgram.id);
+  assert.equal(currentSwitch.ok, false);
+  const missingSwitch = requestProgramSwitch([currentProgram], '99');
+  assert.equal(missingSwitch.ok, false);
   assert.equal(hasCurrentProgram(listed.map((item) => ({
     id: item.id,
     name: item.name,
@@ -484,6 +511,10 @@ try {
     rpc: validationRpc,
   });
   assert.equal(signedOut.ok, false);
+  if (!signedOut.ok) {
+    assert.deepEqual(signedOut.errors, [MANUAL_SIGN_IN_SAVE_MESSAGE]);
+    assert.equal(signedOut.errors.join(' ').includes('import'), false);
+  }
   const blankUser = await saveManualProgramForCurrentUser(review, {
     getUserId: async () => ({ ok: true, data: '   ' }),
     loadPrograms: async () => {
@@ -493,6 +524,9 @@ try {
     rpc: validationRpc,
   });
   assert.equal(blankUser.ok, false);
+  if (!blankUser.ok) {
+    assert.deepEqual(blankUser.errors, [MANUAL_SIGN_IN_SAVE_MESSAGE]);
+  }
   assert.equal(loaded, 0);
   assert.equal(validationCalls, 0);
 
@@ -515,6 +549,65 @@ try {
     assert.deepEqual(noCurrent.errors, [MANUAL_NO_ACTIVE_PROGRAM_MESSAGE]);
   }
   assert.equal(validationCalls, 0);
+
+  const remappedSignIn = await saveManualProgramForCurrentUser(review, {
+    getUserId: async () => ({ ok: true, data: USER_ID }),
+    loadPrograms: async () => ({ ok: true, data: [currentProgram] }),
+    rpc: async () => ({ data: null, error: { message: 'Not authenticated' } }),
+  });
+  assert.equal(remappedSignIn.ok, false);
+  if (!remappedSignIn.ok) {
+    assert.deepEqual(remappedSignIn.errors, [MANUAL_SIGN_IN_SAVE_MESSAGE]);
+  }
+  assert.match(IMPORT_SIGN_IN_MESSAGE, /saving an import/);
+
+  let activationCalls = 0;
+  const switchUnavailable = await activateOwnedProgramForCurrentUser('8', {
+    getUserId: async () => ({ ok: true, data: USER_ID }),
+  });
+  assert.equal(ACTIVATION_RPC_ENABLED, false);
+  assert.deepEqual(switchUnavailable, { ok: false, error: PROGRAM_SWITCH_UNAVAILABLE_MESSAGE });
+  const switchSignedOut = await activateOwnedProgramForCurrentUser('8', {
+    getUserId: async () => ({ ok: false, error: 'signed out' }),
+    rpc: async () => {
+      activationCalls += 1;
+      return { data: 8, error: null };
+    },
+  });
+  assert.equal(switchSignedOut.ok, false);
+  if (!switchSignedOut.ok) {
+    assert.equal(switchSignedOut.error, MANUAL_SIGN_IN_SWITCH_MESSAGE);
+  }
+  const switchBadId = await activateOwnedProgramForCurrentUser('0', {
+    getUserId: async () => ({ ok: true, data: USER_ID }),
+    rpc: async () => {
+      activationCalls += 1;
+      return { data: 1, error: null };
+    },
+  });
+  assert.equal(switchBadId.ok, false);
+  assert.equal(activationCalls, 0);
+  const switched = await activateOwnedProgramForCurrentUser('8', {
+    getUserId: async () => ({ ok: true, data: USER_ID }),
+    rpc: async (programId) => {
+      activationCalls += 1;
+      assert.equal(programId, '8');
+      return { data: 8, error: null };
+    },
+  });
+  assert.equal(switched.ok, true);
+  if (switched.ok) {
+    assert.equal(switched.programId, '8');
+  }
+  const hiddenProgram = await activateOwnedProgramForCurrentUser('8', {
+    getUserId: async () => ({ ok: true, data: USER_ID }),
+    rpc: async () => ({ data: null, error: { message: 'program_not_found' } }),
+  });
+  assert.equal(hiddenProgram.ok, false);
+  if (!hiddenProgram.ok) {
+    assert.match(hiddenProgram.error, /Nothing was changed/);
+  }
+  assert.equal(activationCalls, 1);
 
   const reloaded = await saveManualProgramForCurrentUser(review, {
     getUserId: async () => ({ ok: true, data: USER_ID }),
@@ -557,6 +650,10 @@ try {
     },
   });
   assert.equal(signedOutList.ok, false);
+  if (!signedOutList.ok) {
+    assert.equal(signedOutList.error, MANUAL_SIGN_IN_LIST_MESSAGE);
+    assert.equal(signedOutList.error.includes('import'), false);
+  }
   assert.equal(selectCalls, 0);
 
   const catalogResult = await loadExerciseCatalog({
@@ -625,8 +722,18 @@ try {
     assert.equal(builderSource.includes(label), true, label);
   }
   assert.equal(builderSource.includes("from 'react-native'"), true);
-  assert.equal(listSource.includes('Pressable'), false);
-  assert.equal(listSource.includes('onPress'), false);
+  assert.equal(builderSource.includes('VIEW_SAVED_PROGRAMS_LABEL'), true);
+  assert.equal(builderSource.includes('href="/program/saved"'), true);
+  assert.equal(builderSource.includes('savedProgramId == null'), true);
+  assert.equal(builderSource.includes(MANUAL_SAVE_ONCE_MESSAGE), false);
+  assert.equal(builderSource.includes('MANUAL_SAVE_ONCE_MESSAGE'), true);
+  assert.equal(builderSource.includes('saving an import'), false);
+  assert.equal(listSource.includes('Pressable'), true);
+  assert.equal(listSource.includes('requestProgramSwitch'), true);
+  assert.equal(listSource.includes('UNFINISHED_WORKOUT_SWITCH_MESSAGE'), true);
+  assert.equal(listSource.includes('{prompt?.body}'), true);
+  assert.equal(listSource.includes('Keep the current program'), true);
+  assert.equal(listSource.includes('activate_owned_program'), false);
   assert.equal(listSource.includes('savedProgramListItems'), true);
 
   assert.equal(
@@ -638,6 +745,12 @@ try {
     true,
   );
   assert.equal(buildScreen.includes('saveManualProgramForCurrentUser(review)'), true);
+  assert.equal(buildScreen.includes('saveLock.current'), true);
+  assert.equal(savedScreen.includes('activateOwnedProgramForCurrentUser'), true);
+  assert.equal(savedScreen.includes('requestProgramSwitch'), true);
+  assert.equal(savedScreen.includes('supabase'), false);
+  assert.equal(clientSource.includes('ACTIVATION_RPC_ENABLED = false'), true);
+  assert.equal(clientSource.includes(VIEW_SAVED_PROGRAMS_LABEL), false);
   assert.equal(buildScreen.includes('listProgramDays'), false);
   assert.equal(savedScreen.includes('listProgramDays'), false);
   assert.equal(

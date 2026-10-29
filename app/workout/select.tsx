@@ -8,6 +8,7 @@ import {
 } from '@/components/unfinished-session-card';
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
+import { NO_ACTIVE_PROGRAM_CODE } from '@/lib/active-program';
 import { useAuth } from '@/lib/auth-context';
 import { partitionUnfinishedSessions, workoutNavigationTarget } from '@/lib/workout-day-selection';
 import {
@@ -58,6 +59,7 @@ export default function SelectWorkoutDayScreen() {
   const [decision, setDecision] = useState<DayDecision | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [loadCode, setLoadCode] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const decisionRef = useRef<DayDecision | null>(null);
   decisionRef.current = decision;
@@ -99,9 +101,11 @@ export default function SelectWorkoutDayScreen() {
 
         if (!result.ok) {
           setErrorMessage(result.error);
+          setLoadCode(result.code ?? null);
           setDays([]);
         } else {
           setErrorMessage(null);
+          setLoadCode(null);
           setDays(result.data);
         }
 
@@ -112,6 +116,7 @@ export default function SelectWorkoutDayScreen() {
 
           if (isMounted && !refreshed.ok) {
             setErrorMessage(refreshed.error);
+            setLoadCode(null);
           }
         }
 
@@ -365,7 +370,11 @@ export default function SelectWorkoutDayScreen() {
       {isLoading ? (
         <Text style={styles.status}>Loading workout days...</Text>
       ) : errorMessage && days.length === 0 ? (
-        <Text style={styles.error}>Could not load workout days. {errorMessage}</Text>
+        <Text style={styles.error}>
+          {loadCode === NO_ACTIVE_PROGRAM_CODE
+            ? errorMessage
+            : `Could not load workout days. ${errorMessage}`}
+        </Text>
       ) : (
         days.map((day) => {
           const isStarting = busyAction === `day:${day.id}`;

@@ -1,4 +1,7 @@
 import {
+  MANUAL_SIGN_IN_LIST_MESSAGE,
+  MANUAL_SIGN_IN_SAVE_MESSAGE,
+  MANUAL_SIGN_IN_SWITCH_MESSAGE,
   saveManualProgram,
   toSavedPrograms,
   type CatalogExercise,
@@ -79,7 +82,7 @@ export async function loadOwnedPrograms(io?: {
   const selectPrograms = io?.selectPrograms ?? defaultSelectPrograms;
   const user = await getUserId();
   if (!user.ok || user.data.trim() === '') {
-    return { ok: false, error: IMPORT_SIGN_IN_MESSAGE };
+    return { ok: false, error: MANUAL_SIGN_IN_LIST_MESSAGE };
   }
   const selected = await selectPrograms(user.data);
   if (selected.error) {
@@ -120,15 +123,98 @@ export async function saveManualProgramForCurrentUser(
   const rpc = io?.rpc ?? defaultSaveRpc;
   const user = await getUserId();
   if (!user.ok || user.data.trim() === '') {
-    return { ok: false, errors: [IMPORT_SIGN_IN_MESSAGE] };
+    return { ok: false, errors: [MANUAL_SIGN_IN_SAVE_MESSAGE] };
   }
   const programs = await loadPrograms();
   if (!programs.ok) {
-    return { ok: false, errors: [programs.error] };
+    return { ok: false, errors: manualSaveErrors([programs.error]) };
   }
-  return saveManualProgram(review, {
+  const saved = await saveManualProgram(review, {
     userId: user.data,
     programs: programs.data,
     rpc,
   });
+  if (!saved.ok) {
+    return { ok: false, errors: manualSaveErrors(saved.errors) };
+  }
+  return saved;
+}
+
+function manualSaveErrors(errors: readonly string[]): string[] {
+  return errors.map((error) =>
+    error === IMPORT_SIGN_IN_MESSAGE ? MANUAL_SIGN_IN_SAVE_MESSAGE : error,
+  );
+}
+
+export const ACTIVATION_RPC_ENABLED = false;
+
+export const PROGRAM_SWITCH_UNAVAILABLE_MESSAGE =
+  'Program switching stays off in this build. Nothing was changed.';
+
+export type ActivateOwnedProgramRpc = (
+  programId: string,
+) => Promise<{ data: unknown; error: { message?: string | null } | null }>;
+
+export type ActivateOwnedProgramResult =
+  | { ok: true; programId: string }
+  | { ok: false; error: string };
+
+const PROGRAM_ID_LIMIT = 9223372036854775807n;
+
+export function acceptedOwnedProgramId(programId: string): boolean {
+  if (!/^[1-9][0-9]*$/.test(programId) || programId.length > 19) {
+    return false;
+  }
+  try {
+    const value = BigInt(programId);
+    return value >= 1n && value <= PROGRAM_ID_LIMIT;
+  } catch {
+    return false;
+  }
+}
+
+function activationFailure(message: string | null | undefined): string {
+  const text = message?.trim() ?? '';
+  if (text.includes('Not authenticated') || text === IMPORT_SIGN_IN_MESSAGE) {
+    return MANUAL_SIGN_IN_SWITCH_MESSAGE;
+  }
+  if (text.includes('program_not_found')) {
+    return 'That program is not available to switch to. Nothing was changed.';
+  }
+  if (text.includes('active_program_count')) {
+    return 'Could not keep exactly one current program. Nothing was changed.';
+  }
+  return 'Could not switch programs. Nothing was changed.';
+}
+
+async function defaultActivateRpc(programId: string) {
+  const { supabase } = await import('../supabase.ts');
+  const result = await supabase.rpc('activate_owned_program', { p_program_id: programId });
+  return { data: result.data, error: result.error };
+}
+
+export async function activateOwnedProgramForCurrentUser(
+  programId: string,
+  io?: {
+    getUserId?: () => Promise<UserIdResult>;
+    rpc?: ActivateOwnedProgramRpc;
+  },
+): Promise<ActivateOwnedProgramResult> {
+  const getUserId = io?.getUserId ?? defaultGetUserId;
+  const user = await getUserId();
+  if (!user.ok || user.data.trim() === '') {
+    return { ok: false, error: MANUAL_SIGN_IN_SWITCH_MESSAGE };
+  }
+  if (!acceptedOwnedProgramId(programId)) {
+    return { ok: false, error: 'Choose a saved program. Nothing was changed.' };
+  }
+  if (!io?.rpc && !ACTIVATION_RPC_ENABLED) {
+    return { ok: false, error: PROGRAM_SWITCH_UNAVAILABLE_MESSAGE };
+  }
+  const rpc = io?.rpc ?? ((id: string) => defaultActivateRpc(id));
+  const result = await rpc(programId);
+  if (result.error || result.data == null || String(result.data).trim() === '') {
+    return { ok: false, error: activationFailure(result.error?.message) };
+  }
+  return { ok: true, programId: String(result.data) };
 }

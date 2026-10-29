@@ -8,6 +8,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { Link } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
@@ -17,9 +18,11 @@ import {
   ADD_EXERCISE_LABEL,
   CHOOSE_EXERCISE_LABEL,
   MANUAL_NO_ACTIVE_PROGRAM_MESSAGE,
+  MANUAL_SAVE_ONCE_MESSAGE,
   MANUAL_SAVED_INACTIVE_MESSAGE,
   PROGRAM_NAME_LABEL,
   SAVE_ROUTINE_LABEL,
+  VIEW_SAVED_PROGRAMS_LABEL,
   addExerciseLabel,
   applyManualEdit,
   applyManualNumber,
@@ -74,6 +77,9 @@ export function ManualProgramBuilder({
   const [catalogQuery, setCatalogQuery] = useState('');
 
   function edit(next: ManualEdit) {
+    if (savedProgramId != null) {
+      return;
+    }
     const result = applyManualEdit(review, next);
     setFieldError(result.error);
     if (result.review !== review) {
@@ -88,6 +94,9 @@ export function ManualProgramBuilder({
     field: 'sets' | 'repsMin' | 'repsMax',
     raw: string,
   ) {
+    if (savedProgramId != null) {
+      return;
+    }
     const key = `${dayIndex}:${exerciseIndex}:${field}`;
     const result = applyManualNumber(review, { dayIndex, exerciseIndex, field, raw });
     setFieldError(result.error);
@@ -122,6 +131,7 @@ export function ManualProgramBuilder({
         </Text>
       )}
 
+      <View pointerEvents={savedProgramId == null ? 'auto' : 'none'}>
       <View style={styles.field}>
         <Text style={styles.fieldLabel}>Program name</Text>
         <TextInput
@@ -307,6 +317,7 @@ export function ManualProgramBuilder({
         style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
         <Text style={styles.secondaryButtonLabel}>{ADD_DAY_LABEL}</Text>
       </Pressable>
+      </View>
 
       {fieldError ? <Text style={styles.error}>{fieldError}</Text> : null}
       {saveErrors.map((error) => (
@@ -315,19 +326,30 @@ export function ManualProgramBuilder({
         </Text>
       ))}
       {savedProgramId ? (
-        <Text style={styles.notice}>
-          {MANUAL_SAVED_INACTIVE_MESSAGE} Saved id {savedProgramId}.
+        <Text accessibilityLabel={MANUAL_SAVED_INACTIVE_MESSAGE} style={styles.notice}>
+          {MANUAL_SAVED_INACTIVE_MESSAGE} Saved id {savedProgramId}. {MANUAL_SAVE_ONCE_MESSAGE}
         </Text>
       ) : null}
 
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={SAVE_ROUTINE_LABEL}
-        disabled={isSaving}
-        onPress={onSave}
-        style={({ pressed }) => [styles.primaryButton, (pressed || isSaving) && styles.pressed]}>
-        <Text style={styles.primaryButtonLabel}>{isSaving ? 'Saving...' : SAVE_ROUTINE_LABEL}</Text>
-      </Pressable>
+      {savedProgramId == null ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={SAVE_ROUTINE_LABEL}
+          disabled={isSaving}
+          onPress={onSave}
+          style={({ pressed }) => [styles.primaryButton, (pressed || isSaving) && styles.pressed]}>
+          <Text style={styles.primaryButtonLabel}>{isSaving ? 'Saving...' : SAVE_ROUTINE_LABEL}</Text>
+        </Pressable>
+      ) : (
+        <Link href="/program/saved" asChild>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={VIEW_SAVED_PROGRAMS_LABEL}
+            style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}>
+            <Text style={styles.primaryButtonLabel}>{VIEW_SAVED_PROGRAMS_LABEL}</Text>
+          </Pressable>
+        </Link>
+      )}
 
       <Modal
         animationType="slide"

@@ -4,7 +4,7 @@ import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
-import { ensureOwnProgram } from '@/lib/programs';
+import { loadActiveProgram } from '@/lib/programs';
 import { supabase } from '@/lib/supabase';
 
 const palette = Colors.dark;
@@ -70,7 +70,7 @@ export default function ProgramDayScreen() {
     let isMounted = true;
 
     async function loadProgramDay() {
-      const programResult = await ensureOwnProgram();
+      const programResult = await loadActiveProgram();
 
       if (!isMounted) {
         return;

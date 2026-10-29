@@ -4,6 +4,7 @@ import { Link, useFocusEffect } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
+import { NO_ACTIVE_PROGRAM_CODE } from '@/lib/active-program';
 import { listProgramDays, type ProgramDayOption } from '@/lib/workout-session';
 
 const palette = Colors.dark;
@@ -12,6 +13,7 @@ export default function ProgramScreen() {
   const [programDays, setProgramDays] = useState<ProgramDayOption[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [loadCode, setLoadCode] = useState<string | null>(null);
 
   useFocusEffect(
     useCallback(() => {
@@ -26,9 +28,11 @@ export default function ProgramScreen() {
 
         if (!result.ok) {
           setErrorMessage(result.error);
+          setLoadCode(result.code ?? null);
           setProgramDays([]);
         } else {
           setErrorMessage(null);
+          setLoadCode(null);
           setProgramDays(result.data);
         }
 
@@ -43,15 +47,19 @@ export default function ProgramScreen() {
     }, []),
   );
 
+  const noCurrentProgram = errorMessage != null && loadCode === NO_ACTIVE_PROGRAM_CODE;
+
   return (
     <Screen>
       <Text style={styles.title}>Program</Text>
       <Text style={styles.subtitle}>
         {isLoading
           ? 'Loading program...'
-          : errorMessage
-            ? errorMessage
-            : `${programDays.length}-day split`}
+          : noCurrentProgram
+            ? 'No current program'
+            : errorMessage
+              ? errorMessage
+              : `${programDays.length}-day split`}
       </Text>
 
       <Link href="/program/build" asChild>
@@ -73,6 +81,8 @@ export default function ProgramScreen() {
 
       {isLoading ? (
         <Text style={styles.status}>Loading program days...</Text>
+      ) : noCurrentProgram ? (
+        <Text style={styles.error}>{errorMessage}</Text>
       ) : errorMessage ? (
         <Text style={styles.error}>
           Could not load program days. {errorMessage}

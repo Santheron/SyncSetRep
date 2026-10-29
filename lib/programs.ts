@@ -1,15 +1,23 @@
+import {
+  decideActiveProgram,
+  NO_ACTIVE_PROGRAM_CODE,
+  NO_ACTIVE_PROGRAM_MESSAGE,
+  type NoActiveProgramCode,
+} from '@/lib/active-program';
 import { getAuthenticatedUserId } from '@/lib/current-user';
 import { logOwnedDataError } from '@/lib/rls-error';
 import { supabase } from '@/lib/supabase';
 
-type Result<T> = { ok: true; data: T } | { ok: false; error: string };
+export type ProgramLoadResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; code?: NoActiveProgramCode };
 
 function formatError(error: { message?: string | null } | null, fallback: string): string {
   const message = error?.message?.trim();
   return message ? message : fallback;
 }
 
-export async function ensureOwnProgram(): Promise<Result<string>> {
+export async function loadActiveProgram(): Promise<ProgramLoadResult<string>> {
   const userResult = await getAuthenticatedUserId();
 
   if (!userResult.ok) {
@@ -25,44 +33,40 @@ export async function ensureOwnProgram(): Promise<Result<string>> {
     .limit(1)
     .maybeSingle();
 
-  if (!existingActive.error && existingActive.data?.id != null) {
-    return { ok: true, data: String(existingActive.data.id) };
+  const decision = decideActiveProgram({
+    signedIn: true,
+    queryFailed: existingActive.error != null,
+    activeId: existingActive.data?.id != null ? String(existingActive.data.id) : null,
+  });
+
+  if (decision.action === 'use') {
+    return { ok: true, data: decision.programId };
   }
 
-  const existingAny = await supabase
-    .from('programs')
-    .select('id')
-    .eq('user_id', userResult.data)
-    .order('id', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (!existingAny.error && existingAny.data?.id != null) {
-    return { ok: true, data: String(existingAny.data.id) };
-  }
-
-  const { data, error } = await supabase.rpc('copy_starter_program_for_current_user');
-
-  if (error || data == null) {
+  if (decision.code === 'query-error') {
     logOwnedDataError({
       table: 'programs',
-      operation: 'rpc',
+      operation: 'select',
       userId: userResult.data,
-      error: error ?? { message: 'copy_starter_program_for_current_user returned no id' },
+      error: existingActive.error ?? { message: 'Could not load your current program.' },
     });
     return {
       ok: false,
-      error: formatError(error, 'Could not create your program.'),
+      error: formatError(existingActive.error, 'Could not load your current program.'),
     };
   }
 
-  return { ok: true, data: String(data) };
+  return {
+    ok: false,
+    error: NO_ACTIVE_PROGRAM_MESSAGE,
+    code: NO_ACTIVE_PROGRAM_CODE,
+  };
 }
 
 export async function assertOwnProgramDay(
   programDayId: string,
-): Promise<Result<{ programId: string }>> {
-  const programResult = await ensureOwnProgram();
+): Promise<ProgramLoadResult<{ programId: string }>> {
+  const programResult = await loadActiveProgram();
 
   if (!programResult.ok) {
     return programResult;

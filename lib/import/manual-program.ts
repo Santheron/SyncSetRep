@@ -43,6 +43,24 @@ export const MANUAL_NO_ACTIVE_PROGRAM_MESSAGE =
 export const MANUAL_SAVED_INACTIVE_MESSAGE =
   'Saved. This routine is not your current program.';
 
+export const MANUAL_SAVE_ONCE_MESSAGE = 'This screen will not save this routine again.';
+
+export const VIEW_SAVED_PROGRAMS_LABEL = 'View saved programs';
+
+export const MANUAL_SIGN_IN_SAVE_MESSAGE = 'Sign in before saving a routine. Nothing was saved.';
+
+export const MANUAL_SIGN_IN_LIST_MESSAGE = 'Sign in to see your saved routines.';
+
+export const MANUAL_SIGN_IN_SWITCH_MESSAGE =
+  'Sign in before choosing a current program. Nothing was changed.';
+
+export const UNFINISHED_WORKOUT_SWITCH_MESSAGE =
+  'An unfinished workout stays on its original day. Completed workouts stay saved.';
+
+export const USE_ROUTINE_LABEL = 'Use this routine';
+
+export const KEEP_CURRENT_PROGRAM_LABEL = 'Keep the current program';
+
 export const MANUAL_SETS_MESSAGE = `Enter sets from ${SETS_MIN} through ${SETS_MAX}.`;
 
 export const MANUAL_REPS_MESSAGE = `Enter reps from ${REPS_MIN} through ${REPS_MAX}.`;
@@ -74,7 +92,15 @@ export type SavedProgramListItem = {
   id: string;
   name: string;
   statusLabel: 'Current program' | 'Saved program';
-  canActivate: false;
+  offerSwitch: boolean;
+};
+
+export type ProgramSwitchPrompt = {
+  programId: string;
+  title: string;
+  body: string;
+  confirmLabel: typeof USE_ROUTINE_LABEL;
+  cancelLabel: typeof KEEP_CURRENT_PROGRAM_LABEL;
 };
 
 export type ManualEdit =
@@ -114,8 +140,37 @@ export function savedProgramListItems(
     id: program.id,
     name: program.name,
     statusLabel: program.isActive ? 'Current program' : 'Saved program',
-    canActivate: false,
+    offerSwitch: program.isActive === false,
   }));
+}
+
+export function requestProgramSwitch(
+  programs: readonly SavedProgramSummary[],
+  programId: string,
+): { ok: true; prompt: ProgramSwitchPrompt } | { ok: false; error: string } {
+  const program = programs.find((item) => item.id === programId);
+
+  if (!program) {
+    return { ok: false, error: 'That saved program is not in this list. Nothing was changed.' };
+  }
+
+  if (program.isActive) {
+    return {
+      ok: false,
+      error: 'That program is already your current program. Nothing was changed.',
+    };
+  }
+
+  return {
+    ok: true,
+    prompt: {
+      programId: program.id,
+      title: `Use ${program.name} as your current program?`,
+      body: UNFINISHED_WORKOUT_SWITCH_MESSAGE,
+      confirmLabel: USE_ROUTINE_LABEL,
+      cancelLabel: KEEP_CURRENT_PROGRAM_LABEL,
+    },
+  };
 }
 
 export function filterCatalog(

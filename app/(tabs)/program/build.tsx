@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, StyleSheet } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 
@@ -23,6 +23,7 @@ export default function BuildRoutineScreen() {
   const [saveErrors, setSaveErrors] = useState<string[]>([]);
   const [savedProgramId, setSavedProgramId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const saveLock = useRef(false);
   const [programsLoaded, setProgramsLoaded] = useState(false);
 
   useFocusEffect(
@@ -60,13 +61,15 @@ export default function BuildRoutineScreen() {
   );
 
   async function save() {
-    if (isSaving || !programsLoaded) {
+    if (saveLock.current || isSaving || !programsLoaded || savedProgramId) {
       return;
     }
+    saveLock.current = true;
     setIsSaving(true);
     setSaveErrors([]);
     const result = await saveManualProgramForCurrentUser(review);
     if (!result.ok) {
+      saveLock.current = false;
       setSaveErrors(result.errors);
       setSavedProgramId(null);
     } else {

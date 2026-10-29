@@ -14,6 +14,9 @@
 -- Payload checks match the verified save_imported_program limits.
 -- lock_timeout and statement_timeout below cover this install transaction.
 -- Each function also sets those limits for its own transaction.
+-- Each function sets syncsetrep.program_activation for that same transaction.
+-- A separate unapplied privilege file can require that setting before
+-- is_active changes. This file does not install that restriction.
 
 BEGIN;
 
@@ -62,6 +65,7 @@ DECLARE
 BEGIN
   PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
   PERFORM pg_catalog.set_config('statement_timeout', '30s', true);
+  PERFORM pg_catalog.set_config('syncsetrep.program_activation', 'on', true);
 
   IF uid IS NULL THEN
     RAISE EXCEPTION 'Not authenticated';
@@ -344,6 +348,7 @@ DECLARE
 BEGIN
   PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
   PERFORM pg_catalog.set_config('statement_timeout', '30s', true);
+  PERFORM pg_catalog.set_config('syncsetrep.program_activation', 'on', true);
 
   IF uid IS NULL THEN
     RAISE EXCEPTION 'Not authenticated';

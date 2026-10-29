@@ -6,7 +6,8 @@ import {
   weightForReplacement,
 } from '@/lib/exercise-swap';
 import { getExerciseProgression } from '@/lib/progression';
-import { assertOwnProgramDay, ensureOwnProgram } from '@/lib/programs';
+import type { NoActiveProgramCode } from '@/lib/active-program';
+import { assertOwnProgramDay, loadActiveProgram } from '@/lib/programs';
 import { logOwnedDataError } from '@/lib/rls-error';
 import { supabase } from '@/lib/supabase';
 import { formatWorkoutActionError } from '@/lib/workout-action-errors';
@@ -106,7 +107,9 @@ export type WorkoutSetDraft = {
   isCompleted: boolean;
 };
 
-type Result<T> = { ok: true; data: T } | { ok: false; error: string };
+type Result<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; code?: NoActiveProgramCode };
 
 type ProgramDayRow = {
   id: string;
@@ -997,7 +1000,7 @@ async function deleteOwnedUnfinishedSessions(sessionIds: string[]): Promise<Resu
 }
 
 export async function listProgramDays(): Promise<Result<ProgramDayOption[]>> {
-  const programResult = await ensureOwnProgram();
+  const programResult = await loadActiveProgram();
 
   if (!programResult.ok) {
     return programResult;
@@ -1748,7 +1751,7 @@ export async function swapWorkoutExercise(input: {
       };
     }
 
-    const programResult = await ensureOwnProgram();
+    const programResult = await loadActiveProgram();
 
     if (!programResult.ok) {
       return {
