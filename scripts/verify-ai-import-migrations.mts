@@ -98,6 +98,11 @@ const saveVerifySql = stripSql(readSql('ai-import-save-program-verify.sql'));
 assert.match(saveVerifySql, /default_transaction_read_only/);
 assert.match(saveVerifySql, new RegExp(SAVE_PROGRAM_BODY_MD5));
 assert.match(saveVerifySql, new RegExp(SAVE_PROGRAM_DEFINITION_MD5));
+assert.equal(saveVerifySql.includes("replace(proc.prosrc, E'\\r\\n', E'\\n')"), true);
+assert.equal(
+  saveVerifySql.includes("replace(pg_get_functiondef(proc.oid), E'\\r\\n', E'\\n')"),
+  true,
+);
 assert.match(saveVerifySql, /search_path=""/);
 assert.equal(/\binsert\s+into\b/i.test(saveVerifySql), false);
 assert.equal(/\bupdate\s+(public|only)\b/i.test(saveVerifySql), false);
@@ -530,8 +535,8 @@ async function runBehavior(PGlite: new () => PgLike) {
       proc.proconfig AS config,
       pg_get_function_identity_arguments(proc.oid) AS identity_arguments,
       lang.lanname AS language_name,
-      md5(proc.prosrc) AS body_md5,
-      md5(pg_get_functiondef(proc.oid)) AS definition_md5
+      md5(replace(proc.prosrc, E'\\r\\n', E'\\n')) AS body_md5,
+      md5(replace(pg_get_functiondef(proc.oid), E'\\r\\n', E'\\n')) AS definition_md5
     FROM pg_proc proc
     JOIN pg_language lang ON lang.oid = proc.prolang
     WHERE proc.proname = 'save_imported_program'

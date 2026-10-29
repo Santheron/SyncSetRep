@@ -1,9 +1,11 @@
 -- Read-only post-check for sql/ai-import-save-program.sql.
 -- Run this after that file is applied and before any import call.
 -- Do not call save_imported_program or consume_ai_import_quota.
--- save_program_body_md5 is md5(prosrc), the exact stored function body.
--- save_program_definition_md5 is md5(pg_get_functiondef(oid)), measured on PostgreSQL 17.11.
--- Both hashes belong to the hardened SECURITY INVOKER function with an empty search_path.
+-- body_md5 is md5 of prosrc after every CRLF line ending is replaced with LF.
+-- definition_md5 is md5 of pg_get_functiondef(oid) after the same replacement.
+-- raw_body_md5 and raw_definition_md5 are the stored bytes. They do not affect post_save_ok.
+-- The expected hashes are the LF text of the hardened function, measured on PostgreSQL 17.11.
+-- A SQL editor that stores carriage returns in prosrc still passes when the normalized text matches.
 -- The five workout fingerprints are the verified 2026-10-29 11:44 backup.
 
 BEGIN;
@@ -21,8 +23,10 @@ WITH save_proc AS (
     proc.prosrc,
     pg_get_function_identity_arguments(proc.oid) AS identity_arguments,
     lang.lanname AS language_name,
-    md5(proc.prosrc) AS body_md5,
-    md5(pg_get_functiondef(proc.oid)) AS definition_md5
+    md5(proc.prosrc) AS raw_body_md5,
+    md5(replace(proc.prosrc, E'\r\n', E'\n')) AS body_md5,
+    md5(pg_get_functiondef(proc.oid)) AS raw_definition_md5,
+    md5(replace(pg_get_functiondef(proc.oid), E'\r\n', E'\n')) AS definition_md5
   FROM pg_proc proc
   JOIN pg_language lang ON lang.oid = proc.prolang
   WHERE proc.oid = to_regprocedure('public.save_imported_program(jsonb)')
@@ -33,7 +37,9 @@ facts AS (
     (SELECT prosecdef FROM save_proc) AS security_definer,
     (SELECT identity_arguments FROM save_proc) AS identity_arguments,
     (SELECT language_name FROM save_proc) AS language_name,
+    (SELECT raw_body_md5 FROM save_proc) AS raw_body_md5,
     (SELECT body_md5 FROM save_proc) AS body_md5,
+    (SELECT raw_definition_md5 FROM save_proc) AS raw_definition_md5,
     (SELECT definition_md5 FROM save_proc) AS definition_md5,
     EXISTS (
       SELECT 1
@@ -85,8 +91,10 @@ SELECT jsonb_pretty(jsonb_build_object(
   'identity_arguments', identity_arguments,
   'language_name', language_name,
   'search_path_empty', search_path_empty,
+  'raw_body_md5', raw_body_md5,
   'body_md5', body_md5,
   'expected_body_md5', 'ab614932badcedfc0c71eb1ee6d00087',
+  'raw_definition_md5', raw_definition_md5,
   'definition_md5', definition_md5,
   'expected_definition_md5', '6275a18bdc001065d7ad77c0c4d52fbb',
   'authenticated_execute', authenticated_execute,
