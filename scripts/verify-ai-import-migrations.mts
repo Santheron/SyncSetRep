@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
 import { IMPORT_ENABLED, PERSIST_REST_SECONDS, SUBTITLE_REQUIRED } from '../lib/import/flags.ts';
 import { TEXT_FIELD_MAX } from '../lib/import/limits.ts';
@@ -79,8 +81,18 @@ assert.equal(stripSql(files.saveRollback).includes('DROP FUNCTION IF EXISTS publ
 
 const quotaSql = stripSql(files.quota);
 assert.match(quotaSql, /SECURITY DEFINER/);
-assert.match(quotaSql, /SET search_path = public/);
+assert.match(quotaSql, /SET search_path = ''/);
+assert.equal(/SET search_path = public/.test(quotaSql), false);
+assert.match(quotaSql, /pg_catalog\.pg_advisory_xact_lock/);
+assert.match(quotaSql, /pg_catalog\.hashtextextended/);
+assert.match(quotaSql, /pg_catalog\.now\(\)/);
 assert.match(quotaSql, /auth\.uid\(\)/);
+assert.match(quotaSql, /SET LOCAL lock_timeout = '5s'/);
+assert.match(quotaSql, /SET LOCAL statement_timeout = '30s'/);
+assert.match(quotaSql, /REVOKE ALL ON TABLE public\.ai_import_attempts FROM PUBLIC, anon, authenticated/);
+assert.match(quotaSql, /REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public\.ai_import_attempts FROM authenticated/);
+assert.match(quotaSql, /GRANT SELECT ON TABLE public\.ai_import_attempts TO authenticated/);
+assert.match(quotaSql, /REVOKE ALL ON SEQUENCE %s FROM PUBLIC, anon, authenticated/);
 assert.match(quotaSql, /REVOKE ALL ON FUNCTION public\.consume_ai_import_quota\(text\) FROM PUBLIC, anon/);
 assert.equal(/\bupdate\s+(public|only)\b/i.test(quotaSql), false);
 assert.equal(/\bdelete\s+from\b/i.test(quotaSql), false);
@@ -800,15 +812,85 @@ async function runBehavior(PGlite: new () => PgLike) {
 
   const quotaDb = new PGlite();
   await quotaDb.exec(fixtureSql);
-  await quotaDb.exec(`INSERT INTO auth.users (id) VALUES ('${USER_A}')`);
+  await quotaDb.exec(`
+    INSERT INTO auth.users (id) VALUES ('${USER_A}'), ('${USER_B}');
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated;
+  `);
+  const timeoutsBefore = await quotaDb.query<{ lock_timeout: string; statement_timeout: string }>(`
+    SELECT current_setting('lock_timeout') AS lock_timeout,
+           current_setting('statement_timeout') AS statement_timeout
+  `);
   await execFile(quotaDb, 'ai-import-quota.sql');
+  const timeoutsAfter = await quotaDb.query<{ lock_timeout: string; statement_timeout: string }>(`
+    SELECT current_setting('lock_timeout') AS lock_timeout,
+           current_setting('statement_timeout') AS statement_timeout
+  `);
+  assert.deepEqual(timeoutsAfter.rows[0], timeoutsBefore.rows[0]);
   const quotaFlags = await quotaDb.query<{ security_definer: boolean; config: string[] | null }>(`
     SELECT prosecdef AS security_definer, proconfig AS config
     FROM pg_proc
     WHERE proname = 'consume_ai_import_quota'
   `);
   assert.equal(quotaFlags.rows[0]?.security_definer, true);
-  assert.equal(quotaFlags.rows[0]?.config?.includes('search_path=public'), true);
+  assert.equal(quotaFlags.rows[0]?.config?.includes('search_path=public'), false);
+  assert.equal(
+    quotaFlags.rows[0]?.config?.some((entry) => entry.replace(/\s/g, '') === 'search_path=' || entry === 'search_path=""'),
+    true,
+  );
+  const quotaPrivileges = await quotaDb.query<{
+    authenticated_select: boolean;
+    authenticated_insert: boolean;
+    authenticated_update: boolean;
+    authenticated_delete: boolean;
+    authenticated_truncate: boolean;
+    anon_insert: boolean;
+    public_insert: boolean;
+    authenticated_sequence_usage: boolean;
+    authenticated_sequence_select: boolean;
+    authenticated_sequence_update: boolean;
+    anon_sequence_usage: boolean;
+    public_sequence_usage: boolean;
+  }>(`
+    SELECT
+      has_table_privilege('authenticated', 'public.ai_import_attempts', 'SELECT') AS authenticated_select,
+      has_table_privilege('authenticated', 'public.ai_import_attempts', 'INSERT') AS authenticated_insert,
+      has_table_privilege('authenticated', 'public.ai_import_attempts', 'UPDATE') AS authenticated_update,
+      has_table_privilege('authenticated', 'public.ai_import_attempts', 'DELETE') AS authenticated_delete,
+      has_table_privilege('authenticated', 'public.ai_import_attempts', 'TRUNCATE') AS authenticated_truncate,
+      has_table_privilege('anon', 'public.ai_import_attempts', 'INSERT') AS anon_insert,
+      has_table_privilege('public', 'public.ai_import_attempts', 'INSERT') AS public_insert,
+      has_sequence_privilege('authenticated', pg_get_serial_sequence('public.ai_import_attempts', 'id')::regclass, 'USAGE') AS authenticated_sequence_usage,
+      has_sequence_privilege('authenticated', pg_get_serial_sequence('public.ai_import_attempts', 'id')::regclass, 'SELECT') AS authenticated_sequence_select,
+      has_sequence_privilege('authenticated', pg_get_serial_sequence('public.ai_import_attempts', 'id')::regclass, 'UPDATE') AS authenticated_sequence_update,
+      has_sequence_privilege('anon', pg_get_serial_sequence('public.ai_import_attempts', 'id')::regclass, 'USAGE') AS anon_sequence_usage,
+      has_sequence_privilege('public', pg_get_serial_sequence('public.ai_import_attempts', 'id')::regclass, 'USAGE') AS public_sequence_usage
+  `);
+  const privileges = quotaPrivileges.rows[0];
+  assert.equal(privileges?.authenticated_select, true);
+  assert.equal(privileges?.authenticated_insert, false);
+  assert.equal(privileges?.authenticated_update, false);
+  assert.equal(privileges?.authenticated_delete, false);
+  assert.equal(privileges?.authenticated_truncate, false);
+  assert.equal(privileges?.anon_insert, false);
+  assert.equal(privileges?.public_insert, false);
+  assert.equal(privileges?.authenticated_sequence_usage, false);
+  assert.equal(privileges?.authenticated_sequence_select, false);
+  assert.equal(privileges?.authenticated_sequence_update, false);
+  assert.equal(privileges?.anon_sequence_usage, false);
+  assert.equal(privileges?.public_sequence_usage, false);
+  await expectRaise(
+    quotaDb,
+    USER_A,
+    `INSERT INTO public.ai_import_attempts (user_id, kind) VALUES ('${USER_A}', 'model')`,
+    'permission denied',
+  );
+  await expectRaise(
+    quotaDb,
+    USER_A,
+    `SELECT nextval(pg_get_serial_sequence('public.ai_import_attempts', 'id'))`,
+    'permission denied',
+  );
   await asUser(quotaDb, USER_A, `SELECT public.consume_ai_import_quota('model')`);
   await asUser(quotaDb, USER_A, `SELECT public.consume_ai_import_quota('model')`);
   await expectRaise(
@@ -821,6 +903,39 @@ async function runBehavior(PGlite: new () => PgLike) {
     `SELECT count(*)::int AS rows FROM public.ai_import_attempts WHERE user_id = '${USER_A}'`,
   );
   assert.equal(attempts.rows[0]?.rows, 2);
+  await asUser(quotaDb, USER_B, `SELECT public.consume_ai_import_quota('model')`);
+  const separated = await quotaDb.query<{ user_id: string; rows: number }>(`
+    SELECT user_id::text, count(*)::int AS rows
+    FROM public.ai_import_attempts
+    WHERE kind = 'model'
+    GROUP BY user_id
+    ORDER BY user_id
+  `);
+  assert.deepEqual(separated.rows, [
+    { user_id: USER_A, rows: 2 },
+    { user_id: USER_B, rows: 1 },
+  ]);
+  await quotaDb.exec('BEGIN');
+  await quotaDb.exec(`SELECT set_config('request.jwt.claim.sub', '${USER_B}', true)`);
+  await quotaDb.exec('SET LOCAL ROLE authenticated');
+  await quotaDb.exec(`SELECT public.consume_ai_import_quota('pdf')`);
+  await quotaDb.exec('ROLLBACK');
+  const rolledBack = await quotaDb.query<{ rows: number }>(`
+    SELECT count(*)::int AS rows
+    FROM public.ai_import_attempts
+    WHERE user_id = '${USER_B}' AND kind = 'pdf'
+  `);
+  assert.equal(rolledBack.rows[0]?.rows, 0);
+  await expectRaise(
+    quotaDb,
+    USER_A,
+    `SELECT public.consume_ai_import_quota('PDF')`,
+    'quota_unavailable',
+  );
+  const afterRejected = await quotaDb.query<{ rows: number }>(
+    `SELECT count(*)::int AS rows FROM public.ai_import_attempts`,
+  );
+  assert.equal(afterRejected.rows[0]?.rows, 3);
   await execFile(quotaDb, 'ai-import-quota-rollback.sql');
   const quotaGone = await quotaDb.query<{ attempts_table: string | null }>(`
     SELECT to_regclass('public.ai_import_attempts')::text AS attempts_table
@@ -843,3 +958,18 @@ if (process.env.RUN_IMPORT_DB === '1') {
 }
 
 console.log('ai import migration checks passed');
+
+if (process.env.RUN_QUOTA_CONCURRENCY === '1') {
+  const script = fileURLToPath(new URL('./verify-ai-import-quota-concurrency.mts', import.meta.url));
+  const code = await new Promise<number>((resolve, reject) => {
+    const child = spawn(process.execPath, ['--experimental-strip-types', script], {
+      stdio: 'inherit',
+      env: process.env,
+    });
+    child.on('error', reject);
+    child.on('exit', (status) => resolve(status ?? 1));
+  });
+  if (code !== 0) {
+    throw new Error(`quota concurrency test exited ${code}`);
+  }
+}
