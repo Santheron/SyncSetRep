@@ -1,0 +1,21 @@
+{
+  "programName": { "origin": "extracted", "value": "Upper Lower" },
+  "days": [
+    {
+      "name": { "origin": "extracted", "value": "Upper" },
+      "subtitle": { "origin": "missing", "value": null },
+      "exercises": [
+        {
+          "sourceName": "Assisted Pull-Up",
+          "sets": { "origin": "extracted", "value": 3, "suggestion": null },
+          "repsMin": { "origin": "missing", "value": null, "suggestion": null },
+          "repsMax": { "origin": "missing", "value": null, "suggestion": null },
+          "restSeconds": { "origin": "missing", "value": null, "suggestion": null },
+          "weight": { "origin": "extracted", "value": "bodyweight", "suggestion": null },
+          "notes": { "origin": "extracted", "value": "AMRAP" }
+        }
+      ]
+    }
+  ],
+  "warnings": []
+}
