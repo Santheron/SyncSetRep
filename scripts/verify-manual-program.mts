@@ -18,8 +18,15 @@ import {
   exerciseChoiceText,
   filterCatalog,
   ALREADY_CURRENT_PROGRAM_MESSAGE,
+  EDIT_SAVE_BLOCKED_MESSAGE,
   FIRST_PROGRAM_UNAVAILABLE_MESSAGE,
   hasCurrentProgram,
+  MANUAL_CHOOSE_EXERCISE_MESSAGE,
+  MANUAL_SAVE_UNAVAILABLE_MESSAGE,
+  MANUAL_SETS_SAVE_MESSAGE,
+  mergeExerciseChoices,
+  previewProgramEdit,
+  validateManualRoutine,
   MANUAL_REPS_MESSAGE,
   MANUAL_SAVE_ONCE_MESSAGE,
   MANUAL_SETS_MESSAGE,
@@ -37,15 +44,36 @@ import {
 } from '../lib/import/manual-program.ts';
 import {
   ACTIVATION_RPC_ENABLED,
+  MANUAL_SAVE_RPC_ENABLED,
   OWNED_PROGRAM_RPC_ENABLED,
   PROGRAM_SWITCH_UNAVAILABLE_MESSAGE,
   activateOwnedProgramForCurrentUser,
   loadExerciseCatalog,
   loadOwnedPrograms,
+  loadProgramDraftForCurrentUser,
   saveManualProgramForCurrentUser,
 } from '../lib/import/manual-program-client.ts';
+import {
+  CATALOG_TARGET_MAX,
+  CATALOG_TARGET_MIN,
+  CUSTOM_EXERCISE_WRITES_ENABLED,
+  EQUIPMENT_TYPES,
+  MUSCLE_GROUPS,
+  PLANNED_EXERCISES,
+  normalizeExerciseName,
+} from '../lib/import/planned-exercises.ts';
+import {
+  assembleProgramDraft,
+  draftIdentity,
+  reviewFromProgramDraft,
+} from '../lib/import/program-draft.ts';
 import { createManualProgramReview, type ProgramReview } from '../lib/import/review-editor.ts';
-import { IMPORT_CAPACITY_MESSAGE, IMPORT_SIGN_IN_MESSAGE } from '../lib/import/save-plan.ts';
+import {
+  IMPORT_CAPACITY_MESSAGE,
+  IMPORT_SIGN_IN_MESSAGE,
+  IMPORT_UNRESOLVED_EXERCISE_MESSAGE,
+} from '../lib/import/save-plan.ts';
+import { buttonPaletteForSurface, contrastRatio } from '../lib/ui/button-contrast.ts';
 import type { ImportSaveRpc } from '../lib/import/save-imported-program.ts';
 
 const USER_ID = '11111111-1111-1111-1111-111111111111';
@@ -558,6 +586,23 @@ try {
   });
   assert.equal(unnamedResult.ok, false);
   assert.equal(validationCalls, 0);
+  const blockedCurrent = await saveManualProgram(review, {
+    userId: USER_ID,
+    programs: [currentProgram],
+  });
+  assert.equal(blockedCurrent.ok, false);
+  if (!blockedCurrent.ok) {
+    assert.deepEqual(blockedCurrent.errors, [MANUAL_SAVE_UNAVAILABLE_MESSAGE]);
+  }
+  const invalidCurrent = await saveManualProgram(unnamed, {
+    userId: USER_ID,
+    programs: [currentProgram],
+  });
+  assert.equal(invalidCurrent.ok, false);
+  if (!invalidCurrent.ok) {
+    assert.equal(invalidCurrent.errors.includes(MANUAL_SAVE_UNAVAILABLE_MESSAGE), false);
+  }
+  assert.equal(validationCalls, 0);
   assert.deepEqual(history, before);
 
   let loaded = 0;
@@ -609,6 +654,144 @@ try {
   }
   assert.equal(validationCalls, 0);
   assert.equal(OWNED_PROGRAM_RPC_ENABLED, false);
+  assert.equal(MANUAL_SAVE_RPC_ENABLED, false);
+  const phoneSave = await saveManualProgramForCurrentUser(review, {
+    getUserId: async () => ({ ok: true, data: USER_ID }),
+    loadPrograms: async () => ({ ok: true, data: [currentProgram] }),
+  });
+  assert.equal(phoneSave.ok, false);
+  if (!phoneSave.ok) {
+    assert.deepEqual(phoneSave.errors, [MANUAL_SAVE_UNAVAILABLE_MESSAGE]);
+  }
+  assert.equal(validationCalls, 0);
+
+  const customReview = number(
+    number(
+      number(
+        edit(
+          edit(
+            edit(
+              edit(createManualProgramReview(), { type: 'rename-program', name: 'Band Day' }),
+              { type: 'rename-day', dayIndex: 0, name: 'Push' },
+            ),
+            { type: 'add-exercise', dayIndex: 0 },
+          ),
+          { type: 'preview-exercise', dayIndex: 0, exerciseIndex: 0, name: 'Band Fly' },
+        ),
+        0,
+        0,
+        'sets',
+        '3',
+      ),
+      0,
+      0,
+      'repsMin',
+      '8',
+    ),
+    0,
+    0,
+    'repsMax',
+    '12',
+  );
+  assert.equal(customReview.days[0]?.exercises[0]?.exerciseId, null);
+  assert.equal(customReview.days[0]?.exercises[0]?.sourceName, 'Band Fly');
+  assert.deepEqual(validateManualRoutine(customReview), { ok: true });
+  assert.deepEqual(validateManualRoutine(edit(customReview, { type: 'add-day' })), { ok: true });
+  let customRpcCalls = 0;
+  const customSaved = await saveManualProgram(customReview, {
+    userId: USER_ID,
+    programs: [currentProgram],
+    rpc: async () => {
+      customRpcCalls += 1;
+      return { data: 80, error: null };
+    },
+  });
+  assert.equal(customSaved.ok, false);
+  if (!customSaved.ok) {
+    assert.deepEqual(customSaved.errors, [MANUAL_SAVE_UNAVAILABLE_MESSAGE]);
+    assert.equal(customSaved.errors.includes(IMPORT_UNRESOLVED_EXERCISE_MESSAGE), false);
+  }
+  assert.equal(customRpcCalls, 0);
+  const customEdit = previewProgramEdit(customReview, USER_ID);
+  assert.deepEqual(customEdit, { ok: false, errors: [EDIT_SAVE_BLOCKED_MESSAGE] });
+  const customFirst = await saveManualProgram(customReview, {
+    userId: USER_ID,
+    programs: [],
+    ownedRpc: async () => {
+      customRpcCalls += 1;
+      return { data: 81, error: null };
+    },
+  });
+  assert.equal(customFirst.ok, false);
+  if (!customFirst.ok) {
+    assert.deepEqual(customFirst.errors, [FIRST_PROGRAM_UNAVAILABLE_MESSAGE]);
+    assert.equal(customFirst.errors.includes(IMPORT_UNRESOLVED_EXERCISE_MESSAGE), false);
+  }
+  assert.equal(customRpcCalls, 0);
+
+  const blankSlot = edit(
+    edit(
+      edit(createManualProgramReview(), { type: 'rename-program', name: 'Band Day' }),
+      { type: 'rename-day', dayIndex: 0, name: 'Push' },
+    ),
+    { type: 'add-exercise', dayIndex: 0 },
+  );
+  const blankSave = await saveManualProgram(blankSlot, {
+    userId: USER_ID,
+    programs: [currentProgram],
+    rpc: async () => {
+      customRpcCalls += 1;
+      return { data: 82, error: null };
+    },
+  });
+  assert.equal(blankSave.ok, false);
+  if (!blankSave.ok) {
+    assert.equal(blankSave.errors.includes(MANUAL_CHOOSE_EXERCISE_MESSAGE), true);
+    assert.equal(blankSave.errors.includes(MANUAL_SETS_SAVE_MESSAGE), true);
+    assert.equal(blankSave.errors.includes(IMPORT_UNRESOLVED_EXERCISE_MESSAGE), false);
+    assert.equal(blankSave.errors.includes(MANUAL_SAVE_UNAVAILABLE_MESSAGE), false);
+    assert.equal(blankSave.errors.includes(EDIT_SAVE_BLOCKED_MESSAGE), false);
+  }
+  assert.equal(customRpcCalls, 0);
+  const plannedSelection = number(
+    number(
+      number(
+        edit(blankSlot, {
+          type: 'choose-exercise',
+          dayIndex: 0,
+          exerciseIndex: 0,
+          exerciseId: 'planned:band-fly',
+        }),
+        0,
+        0,
+        'sets',
+        '3',
+      ),
+      0,
+      0,
+      'repsMin',
+      '8',
+    ),
+    0,
+    0,
+    'repsMax',
+    '12',
+  );
+  const plannedSave = await saveManualProgram(plannedSelection, {
+    userId: USER_ID,
+    programs: [currentProgram],
+    rpc: async () => {
+      customRpcCalls += 1;
+      return { data: 83, error: null };
+    },
+  });
+  assert.equal(plannedSave.ok, false);
+  if (!plannedSave.ok) {
+    assert.equal(plannedSave.errors.includes(MANUAL_CHOOSE_EXERCISE_MESSAGE), true);
+    assert.equal(plannedSave.errors.includes(IMPORT_UNRESOLVED_EXERCISE_MESSAGE), false);
+    assert.equal(plannedSave.errors.includes(MANUAL_SAVE_UNAVAILABLE_MESSAGE), false);
+  }
+  assert.equal(customRpcCalls, 0);
   let injectedOwnedCalls = 0;
   const injectedFirst = await saveManualProgramForCurrentUser(review, {
     getUserId: async () => ({ ok: true, data: USER_ID }),
@@ -742,8 +925,235 @@ try {
   });
   assert.equal(catalogResult.ok, true);
   if (catalogResult.ok) {
-    assert.deepEqual(catalogResult.data, [{ id: '4', name: 'Bench Press' }]);
+    assert.deepEqual(catalogResult.data, [
+      { id: '4', name: 'Bench Press', muscle: null, equipment: null },
+    ]);
   }
+
+  const workoutHistory = {
+    sessions: [
+      { id: 'session-1', programDayId: '3', finishedAt: '2026-10-01T00:00:00Z' },
+      { id: 'session-2', programDayId: '4', finishedAt: null },
+    ],
+    sets: [
+      { id: 'set-1', sessionId: 'session-1', exerciseId: '4' },
+      { id: 'set-2', sessionId: 'session-2', exerciseId: '12' },
+    ],
+  };
+  const beforeHistory = structuredClone(workoutHistory);
+  const assembled = assembleProgramDraft({
+    programId: '8',
+    name: 'Off season',
+    isActive: false,
+    focusDayId: '4',
+    days: [
+      { id: '3', name: 'Push', subtitle: 'Upper', dayOrder: 1 },
+      { id: '4', name: 'Pull', subtitle: null, dayOrder: 2 },
+    ],
+    exercises: [
+      {
+        id: '30',
+        programDayId: '3',
+        exerciseId: '4',
+        name: 'Bench Press',
+        order: 1,
+        targetSets: 4,
+        minReps: 6,
+        maxReps: 10,
+        notes: 'Pause',
+      },
+      {
+        id: '31',
+        programDayId: '4',
+        exerciseId: '12',
+        name: 'Row',
+        order: 1,
+        targetSets: 3,
+        minReps: 8,
+        maxReps: 12,
+        notes: null,
+      },
+    ],
+  });
+  assert.equal(assembled.ok, true);
+  if (!assembled.ok) {
+    throw new Error('draft');
+  }
+  const beforeDraft = structuredClone(assembled.draft);
+  const beforeIdentity = draftIdentity(assembled.draft);
+  assert.equal(assembled.focusDayIndex, 1);
+  let edited = reviewFromProgramDraft(assembled.draft);
+  assert.equal(edited.programName, 'Off season');
+  assert.equal(edited.days[0]?.name, 'Push');
+  assert.equal(edited.days[0]?.exercises[0]?.sets.value, 4);
+  assert.equal(edited.days[0]?.exercises[0]?.repsMin.value, 6);
+  assert.equal(edited.days[0]?.exercises[0]?.repsMax.value, 10);
+  assert.equal(edited.days[0]?.exercises[0]?.notes, 'Pause');
+  edited = applyManualEdit(edited, { type: 'rename-day', dayIndex: 0, name: 'Push day' }).review;
+  edited = applyManualEdit(edited, { type: 'add-day' }).review;
+  edited = applyManualEdit(edited, { type: 'move-day', dayIndex: 2, direction: 'up' }).review;
+  edited = applyManualEdit(edited, { type: 'remove-day', dayIndex: 1 }).review;
+  edited = applyManualEdit(edited, { type: 'add-exercise', dayIndex: 0 }).review;
+  const addedIndex = (edited.days[0]?.exercises.length ?? 1) - 1;
+  edited = applyManualEdit(edited, {
+    type: 'preview-exercise',
+    dayIndex: 0,
+    exerciseIndex: addedIndex,
+    name: 'Band Fly',
+  }).review;
+  edited = applyManualNumber(edited, {
+    dayIndex: 0,
+    exerciseIndex: 0,
+    field: 'sets',
+    raw: '5',
+  }).review;
+  edited = applyManualNumber(edited, {
+    dayIndex: 0,
+    exerciseIndex: 0,
+    field: 'repsMin',
+    raw: '5',
+  }).review;
+  edited = applyManualNumber(edited, {
+    dayIndex: 0,
+    exerciseIndex: 0,
+    field: 'repsMax',
+    raw: '8',
+  }).review;
+  edited = applyManualEdit(edited, {
+    type: 'set-notes',
+    dayIndex: 0,
+    exerciseIndex: 0,
+    notes: 'Slow',
+  }).review;
+  assert.equal(edited.days[0]?.name, 'Push day');
+  assert.equal(edited.days[0]?.exercises[0]?.sets.value, 5);
+  assert.equal(edited.days[0]?.exercises[0]?.notes, 'Slow');
+  assert.equal(edited.days[0]?.exercises[0]?.exerciseId, '4');
+  assert.equal(edited.days[0]?.exercises[addedIndex]?.exerciseId, null);
+  assert.equal(edited.days[0]?.exercises[addedIndex]?.sourceName, 'Band Fly');
+  assert.deepEqual(assembled.draft, beforeDraft);
+  assert.deepEqual(draftIdentity(assembled.draft), beforeIdentity);
+  assert.deepEqual(workoutHistory, beforeHistory);
+  assert.equal(workoutHistory.sessions[0]?.programDayId, assembled.draft.days[0]?.id);
+  assert.equal(workoutHistory.sets[0]?.exerciseId, assembled.draft.days[0]?.exercises[0]?.exerciseId);
+  assert.equal(JSON.stringify(edited).includes('session-1'), false);
+  assert.equal(JSON.stringify(edited).includes('set-1'), false);
+  const blockedEdit = previewProgramEdit(reviewFromProgramDraft(assembled.draft), USER_ID);
+  assert.deepEqual(blockedEdit, { ok: false, errors: [EDIT_SAVE_BLOCKED_MESSAGE] });
+  const invalidEdit = previewProgramEdit(
+    applyManualEdit(reviewFromProgramDraft(assembled.draft), {
+      type: 'rename-program',
+      name: '   ',
+    }).review,
+    USER_ID,
+  );
+  assert.equal(invalidEdit.ok, false);
+  assert.equal(invalidEdit.errors.includes(EDIT_SAVE_BLOCKED_MESSAGE), false);
+  assert.deepEqual(workoutHistory, beforeHistory);
+  assert.deepEqual(assembled.draft, beforeDraft);
+
+  let draftSelects = 0;
+  const loadedDraft = await loadProgramDraftForCurrentUser(
+    { programId: '8', dayId: '4' },
+    {
+      getUserId: async () => ({ ok: true, data: USER_ID }),
+      selectProgram: async (userId, id) => {
+        draftSelects += 1;
+        assert.equal(userId, USER_ID);
+        assert.equal(id, '8');
+        return { data: { id: 8, name: 'Off season', is_active: false }, error: null };
+      },
+      selectActiveProgram: async () => {
+        draftSelects += 1;
+        return { data: null, error: null };
+      },
+      selectDays: async (id) => {
+        assert.equal(id, '8');
+        return {
+          data: [
+            { id: 3, name: 'Push', subtitle: 'Upper', day_order: 1 },
+            { id: 4, name: 'Pull', subtitle: null, day_order: 2 },
+          ],
+          error: null,
+        };
+      },
+      selectDraftExercises: async (dayIds) => {
+        assert.deepEqual([...dayIds], ['3', '4']);
+        return {
+          data: [
+            {
+              id: 30,
+              program_day_id: 3,
+              exercise_id: 4,
+              exercise_order: 1,
+              target_sets: 4,
+              min_reps: 6,
+              max_reps: 10,
+              notes: 'Pause',
+              exercise: { name: 'Bench Press' },
+            },
+          ],
+          error: null,
+        };
+      },
+    },
+  );
+  assert.equal(loadedDraft.ok, true);
+  if (loadedDraft.ok) {
+    assert.equal(loadedDraft.focusDayIndex, 1);
+    assert.equal(loadedDraft.draft.isActive, false);
+    assert.equal(loadedDraft.draft.days[0]?.exercises[0]?.name, 'Bench Press');
+    assert.equal(loadedDraft.draft.days[0]?.exercises[0]?.targetSets, 4);
+    assert.equal(loadedDraft.userId, USER_ID);
+  }
+  const signedOutDraft = await loadProgramDraftForCurrentUser(
+    { dayId: '4' },
+    {
+      getUserId: async () => ({ ok: false, error: 'signed out' }),
+      selectActiveProgram: async () => {
+        draftSelects += 1;
+        return { data: null, error: null };
+      },
+    },
+  );
+  assert.equal(signedOutDraft.ok, false);
+  const badDraftId = await loadProgramDraftForCurrentUser(
+    { programId: '0' },
+    {
+      getUserId: async () => {
+        draftSelects += 1;
+        return { ok: true, data: USER_ID };
+      },
+    },
+  );
+  assert.equal(badDraftId.ok, false);
+  assert.equal(draftSelects, 1);
+  assert.deepEqual(workoutHistory, beforeHistory);
+
+  assert.equal(PLANNED_EXERCISES.length >= CATALOG_TARGET_MIN, true);
+  assert.equal(PLANNED_EXERCISES.length <= CATALOG_TARGET_MAX, true);
+  const plannedNames = PLANNED_EXERCISES.map((exercise) => normalizeExerciseName(exercise.name));
+  assert.equal(new Set(plannedNames).size, plannedNames.length);
+  for (const exercise of PLANNED_EXERCISES) {
+    assert.equal(MUSCLE_GROUPS.includes(exercise.muscle), true, exercise.name);
+    assert.equal(EQUIPMENT_TYPES.includes(exercise.equipment), true, exercise.name);
+  }
+  assert.equal(CUSTOM_EXERCISE_WRITES_ENABLED, false);
+  assert.equal(source('lib/import/planned-exercises.ts').includes('INSERT INTO'), false);
+  assert.equal(source('lib/import/program-draft.ts').includes('supabase'), false);
+  const merged = mergeExerciseChoices(
+    [{ id: '4', name: 'Push-Up', muscle: 'Chest', equipment: 'Bodyweight' }],
+    PLANNED_EXERCISES,
+  );
+  assert.equal(merged.filter((exercise) => normalizeExerciseName(exercise.name) === 'push up').length, 1);
+  assert.equal(merged.find((exercise) => exercise.id === '4')?.saved, true);
+  assert.equal(merged.some((exercise) => exercise.saved === false), true);
+  const chestBarbell = filterCatalog(merged, 'press', { muscle: 'Chest', equipment: 'Barbell' });
+  assert.equal(chestBarbell.length > 0, true);
+  assert.equal(
+    chestBarbell.every((exercise) => exercise.muscle === 'Chest' && exercise.equipment === 'Barbell'),
+    true,
+  );
 
   const manualSource = source('lib/import/manual-program.ts');
   const clientSource = source('lib/import/manual-program-client.ts');
@@ -753,6 +1163,13 @@ try {
   const savedScreen = source('app/(tabs)/program/saved.tsx');
   const layoutSource = source('app/(tabs)/program/_layout.tsx');
   const indexSource = source('app/(tabs)/program/index.tsx');
+  const dayScreen = source('app/(tabs)/program/[id].tsx');
+  const draftStart = clientSource.indexOf('export async function loadProgramDraftForCurrentUser');
+  const draftEnd = clientSource.indexOf('export const MANUAL_SAVE_RPC_ENABLED');
+  const draftSource = clientSource.slice(draftStart, draftEnd);
+  for (const token of ['.rpc(', '.insert(', '.update(', '.delete(', 'workout_sessions', 'workout_sets']) {
+    assert.equal(draftSource.includes(token), false, token);
+  }
   const forbidden = [
     'IMPORT_ENABLED',
     'consume_ai_import_quota',
@@ -829,8 +1246,13 @@ try {
   assert.equal(savedScreen.includes('supabase'), false);
   assert.equal(clientSource.includes('ACTIVATION_RPC_ENABLED = false'), true);
   assert.equal(clientSource.includes('OWNED_PROGRAM_RPC_ENABLED = false'), true);
+  assert.equal(clientSource.includes('MANUAL_SAVE_RPC_ENABLED = false'), true);
   assert.equal(
     clientSource.includes('io?.ownedRpc ?? (OWNED_PROGRAM_RPC_ENABLED ? defaultOwnedSaveRpc : undefined)'),
+    true,
+  );
+  assert.equal(
+    clientSource.includes('io?.rpc ?? (MANUAL_SAVE_RPC_ENABLED ? defaultSaveRpc : undefined)'),
     true,
   );
   assert.equal(builderSource.includes('SAVE_FIRST_ROUTINE_LABEL'), true);
@@ -860,6 +1282,76 @@ try {
   assert.equal(buildLink > 0 && buildLink < errorBranch, true);
   assert.equal(savedLink > buildLink && savedLink < errorBranch, true);
   assert.equal(indexSource.includes('listProgramDays'), true);
+  assert.equal(indexSource.includes('primaryBuildButton'), true);
+  assert.equal(indexSource.includes('secondarySavedButton'), true);
+  assert.equal(indexSource.includes('name="add"'), true);
+  assert.equal(indexSource.includes('EDIT_DAY_LABEL'), true);
+  assert.equal(indexSource.includes('minHeight: 56'), true);
+  assert.equal(indexSource.includes("buttonPaletteForSurface('dark')"), true);
+  assert.equal(indexSource.includes('transform'), false);
+  const buildButton = indexSource.slice(
+    indexSource.indexOf('accessibilityLabel="Build a routine"'),
+    indexSource.indexOf('accessibilityLabel="Saved programs"'),
+  );
+  assert.equal(buildLink < indexSource.indexOf('accessibilityLabel="Build a routine"'), true);
+  assert.equal(buildButton.includes('style={({ pressed })'), false);
+  assert.equal(buildButton.includes('style={styles.primaryBuildButton}'), true);
+  assert.equal(buildButton.includes('name="add"'), true);
+  assert.equal(buildButton.includes('primaryButton.icon'), true);
+  assert.equal(buildButton.includes('primaryButton.label') || indexSource.includes('primaryButton.label'), true);
+  assert.equal(indexSource.includes('style={({ pressed })'), false);
+  const darkPair = buttonPaletteForSurface('dark');
+  const lightPair = buttonPaletteForSurface('light');
+  assert.equal(darkPair.background, '#C6FF4D');
+  assert.equal(darkPair.label, '#111111');
+  assert.equal(darkPair.icon, '#111111');
+  assert.equal(lightPair.background, '#111111');
+  assert.equal(lightPair.label, '#F4F4F5');
+  assert.equal(contrastRatio(darkPair.label, darkPair.background) >= 4.5, true);
+  assert.equal(contrastRatio(darkPair.icon, darkPair.background) >= 4.5, true);
+  assert.equal(contrastRatio(lightPair.label, lightPair.background) >= 4.5, true);
+  assert.equal(contrastRatio(lightPair.icon, lightPair.background) >= 4.5, true);
+  assert.equal(dayScreen.includes('EDIT_DAY_LABEL'), true);
+  assert.equal(dayScreen.includes("buttonPaletteForSurface('dark')"), true);
+  assert.equal(dayScreen.includes('style={styles.editButton}'), true);
+  assert.equal(dayScreen.includes('style={({ pressed })'), false);
+  assert.equal(dayScreen.includes('.update('), false);
+  assert.equal(dayScreen.includes('.insert('), false);
+  assert.equal(dayScreen.includes('.rpc('), false);
+  assert.equal(listSource.includes('EDIT_ROUTINE_LABEL'), true);
+  const editRoutineLink = listSource.slice(
+    listSource.indexOf("pathname: '/program/build'"),
+    listSource.indexOf('item.offerSwitch'),
+  );
+  assert.equal(editRoutineLink.includes('style={({ pressed })'), false);
+  assert.equal(editRoutineLink.includes('style={styles.editButton}'), true);
+  const savedProgramsLink = builderSource.slice(
+    builderSource.indexOf('href="/program/saved"'),
+    builderSource.indexOf('<Modal'),
+  );
+  assert.equal(savedProgramsLink.includes('style={({ pressed })'), false);
+  assert.equal(savedProgramsLink.includes('style={styles.primaryButton}'), true);
+  assert.equal(builderSource.includes('accessibilityLabel={`Use ${customName}`}'), true);
+  assert.equal(builderSource.includes('Your exercise'), true);
+  assert.equal(builderSource.includes('normalizeExerciseName'), true);
+  const editPreview = manualSource.slice(
+    manualSource.indexOf('export function previewProgramEdit'),
+    manualSource.indexOf('export async function saveManualProgram'),
+  );
+  assert.equal(editPreview.includes('validateManualRoutine'), true);
+  assert.equal(editPreview.includes('toSavePayload'), false);
+  assert.equal(editPreview.includes('IMPORT_UNRESOLVED_EXERCISE_MESSAGE'), false);
+  assert.equal(manualSource.includes('IMPORT_UNRESOLVED_EXERCISE_MESSAGE'), false);
+  assert.equal(builderSource.includes('LOCAL_DAY_NOTICE'), true);
+  assert.equal(builderSource.includes('DAY_ADDED_LOCALLY_MESSAGE'), true);
+  assert.equal(builderSource.includes('mergeExerciseChoices'), true);
+  assert.equal(builderSource.includes('MUSCLE_GROUPS'), true);
+  assert.equal(buildScreen.includes('previewProgramEdit(review, draftUserId)'), true);
+  assert.equal(
+    buildScreen.indexOf('previewProgramEdit(review, draftUserId)') <
+      buildScreen.indexOf('saveManualProgramForCurrentUser(review)'),
+    true,
+  );
 
   for (const path of [
     'app/(tabs)/program/build.ios.tsx',

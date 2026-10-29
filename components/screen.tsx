@@ -1,19 +1,24 @@
+import { forwardRef } from 'react';
 import { ScrollView, StyleSheet, View, type ScrollViewProps, type ViewProps } from 'react-native';
 
 import { Colors } from '@/constants/theme';
 
 const palette = Colors.dark;
 
-export function Screen({ children, style, ...rest }: ScrollViewProps) {
+export const Screen = forwardRef<ScrollView, ScrollViewProps>(function Screen(
+  { children, style, ...rest },
+  ref,
+) {
   return (
     <ScrollView
+      ref={ref}
       style={styles.scroll}
       contentContainerStyle={[styles.content, style]}
       {...rest}>
       {children}
     </ScrollView>
   );
-}
+});
 
 export function Card({ children, style, ...rest }: ViewProps) {
   return (

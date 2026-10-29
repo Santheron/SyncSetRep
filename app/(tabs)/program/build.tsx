@@ -1,21 +1,46 @@
 import { useCallback, useRef, useState } from 'react';
-import { KeyboardAvoidingView, Platform, StyleSheet } from 'react-native';
-import { useFocusEffect } from 'expo-router';
+import { KeyboardAvoidingView, Platform, StyleSheet, Text } from 'react-native';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 
 import { ManualProgramBuilder } from '@/components/manual-program-builder';
+import { Screen } from '@/components/screen';
+import { Colors } from '@/constants/theme';
 import {
   loadExerciseCatalog,
   loadOwnedPrograms,
+  loadProgramDraftForCurrentUser,
   saveManualProgramForCurrentUser,
 } from '@/lib/import/manual-program-client';
 import {
   hasCurrentProgram,
+  previewProgramEdit,
   type CatalogExercise,
   type SavedProgramSummary,
 } from '@/lib/import/manual-program';
-import { createManualProgramReview, type ProgramReview } from '@/lib/import/review-editor';
+import {
+  DRAFT_LOADING_MESSAGE,
+  reviewFromProgramDraft,
+} from '@/lib/import/program-draft';
+import {
+  createManualProgramReview,
+  type ProgramReview,
+} from '@/lib/import/review-editor';
+
+const palette = Colors.dark;
+
+function firstParam(value: string | string[] | undefined): string | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const trimmed = raw?.trim() ?? '';
+  return trimmed === '' ? undefined : trimmed;
+}
 
 export default function BuildRoutineScreen() {
+  const params = useLocalSearchParams<{ programId?: string | string[]; dayId?: string | string[] }>();
+  const programId = firstParam(params.programId);
+  const dayId = firstParam(params.dayId);
+  const editingRequested = programId != null || dayId != null;
+  const draftKey = `${programId ?? ''}:${dayId ?? ''}`;
+  const loadedDraftKey = useRef<string | null>(null);
   const [review, setReview] = useState<ProgramReview>(createManualProgramReview);
   const [programs, setPrograms] = useState<SavedProgramSummary[]>([]);
   const [catalog, setCatalog] = useState<CatalogExercise[]>([]);
@@ -25,15 +50,21 @@ export default function BuildRoutineScreen() {
   const [isSaving, setIsSaving] = useState(false);
   const saveLock = useRef(false);
   const [programsLoaded, setProgramsLoaded] = useState(false);
+  const [draftReady, setDraftReady] = useState(false);
+  const [draftUserId, setDraftUserId] = useState<string | null>(null);
+  const [focusDayIndex, setFocusDayIndex] = useState<number | null>(null);
 
   useFocusEffect(
     useCallback(() => {
       let isMounted = true;
 
       async function load() {
-        const [programResult, catalogResult] = await Promise.all([
+        const [programResult, catalogResult, draftResult] = await Promise.all([
           loadOwnedPrograms(),
           loadExerciseCatalog(),
+          editingRequested
+            ? loadProgramDraftForCurrentUser({ programId, dayId })
+            : Promise.resolve(null),
         ]);
         if (!isMounted) {
           return;
@@ -50,6 +81,29 @@ export default function BuildRoutineScreen() {
         } else if (programResult.ok) {
           setLoadError(catalogResult.error);
         }
+        if (!editingRequested) {
+          if (loadedDraftKey.current != null) {
+            setReview(createManualProgramReview());
+            setDraftUserId(null);
+            setFocusDayIndex(null);
+            loadedDraftKey.current = null;
+          }
+          setDraftReady(false);
+        } else if (draftResult && loadedDraftKey.current !== draftKey) {
+          if (!draftResult.ok) {
+            setLoadError(draftResult.error);
+            setDraftReady(false);
+            setDraftUserId(null);
+          } else {
+            setReview(reviewFromProgramDraft(draftResult.draft));
+            setDraftUserId(draftResult.userId);
+            setFocusDayIndex(draftResult.focusDayIndex);
+            setDraftReady(true);
+            setSaveErrors([]);
+            setSavedProgramId(null);
+            loadedDraftKey.current = draftKey;
+          }
+        }
         setProgramsLoaded(true);
       }
 
@@ -57,10 +111,22 @@ export default function BuildRoutineScreen() {
       return () => {
         isMounted = false;
       };
-    }, []),
+    }, [dayId, draftKey, editingRequested, programId]),
   );
 
-  async function save() {
+  function save() {
+    if (editingRequested) {
+      if (!draftReady || !draftUserId) {
+        setSaveErrors([DRAFT_LOADING_MESSAGE]);
+        return;
+      }
+      setSaveErrors(previewProgramEdit(review, draftUserId).errors);
+      return;
+    }
+    void saveNewRoutine();
+  }
+
+  async function saveNewRoutine() {
     if (saveLock.current || isSaving || !programsLoaded || savedProgramId) {
       return;
     }
@@ -78,21 +144,29 @@ export default function BuildRoutineScreen() {
     setIsSaving(false);
   }
 
+  if (editingRequested && !draftReady) {
+    return (
+      <Screen>
+        <Text style={styles.loading}>{loadError ?? DRAFT_LOADING_MESSAGE}</Text>
+      </Screen>
+    );
+  }
+
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       style={styles.flex}>
       <ManualProgramBuilder
         catalog={catalog}
+        editing={editingRequested && draftReady}
+        focusDayIndex={focusDayIndex}
         hasActiveProgram={!programsLoaded || loadError != null || hasCurrentProgram(programs)}
         isSaving={isSaving}
         onChange={setReview}
-        onSave={() => {
-          void save();
-        }}
+        onSave={save}
         review={review}
         saveErrors={loadError ? [loadError, ...saveErrors] : saveErrors}
-        savedProgramId={savedProgramId}
+        savedProgramId={editingRequested ? null : savedProgramId}
       />
     </KeyboardAvoidingView>
   );
@@ -101,5 +175,9 @@ export default function BuildRoutineScreen() {
 const styles = StyleSheet.create({
   flex: {
     flex: 1,
+  },
+  loading: {
+    color: palette.text,
+    fontSize: 16,
   },
 });

@@ -249,6 +249,26 @@ export function chooseExercise(
   return replaceDay(review, dayIndex, { ...copyDay(day), exercises });
 }
 
+export function nameUnsavedExercise(
+  review: ProgramReview,
+  dayIndex: number,
+  exerciseIndex: number,
+  name: string,
+): ProgramReview {
+  const day = review.days[dayIndex];
+  const exercise = day?.exercises[exerciseIndex];
+  if (!day || !exercise) {
+    return review;
+  }
+  const next = copyExercise(exercise);
+  next.exerciseId = null;
+  next.matchStatus = 'unmatched';
+  next.sourceName = name.trim() === '' ? null : name;
+  const exercises = day.exercises.map(copyExercise);
+  exercises[exerciseIndex] = next;
+  return replaceDay(review, dayIndex, { ...copyDay(day), exercises });
+}
+
 function rangeFor(field: ReviewNumberField): { min: number; max: number } {
   if (field === 'sets') {
     return { min: SETS_MIN, max: SETS_MAX };

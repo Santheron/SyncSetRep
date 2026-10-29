@@ -9,6 +9,20 @@ import {
   type OwnedProgramSaveRpc,
   type SavedProgramSummary,
 } from './manual-program.ts';
+import { NO_ACTIVE_PROGRAM_MESSAGE } from '../active-program.ts';
+import {
+  equipmentFromType,
+  muscleFromCategory,
+} from './planned-exercises.ts';
+import {
+  acceptedDraftId,
+  assembleProgramDraft,
+  DAY_NOT_IN_ROUTINE_MESSAGE,
+  DRAFT_ID_MESSAGE,
+  readDraftNumber,
+  readDraftText,
+  type ProgramDraft,
+} from './program-draft.ts';
 import type { ProgramReview } from './review-editor.ts';
 import type { SaveImportedProgramPayload } from './save-payload.ts';
 import { IMPORT_SIGN_IN_MESSAGE } from './save-plan.ts';
@@ -29,12 +43,68 @@ export type SelectPrograms = (userId: string) => Promise<{
 }>;
 
 export type SelectExercises = () => Promise<{
-  data: Array<{ id: number | string; name: string }> | null;
+  data: Array<{
+    id: number | string;
+    name: string;
+    category?: string | null;
+    equipment_type?: string | null;
+  }> | null;
   error: { message?: string | null } | null;
 }>;
 
+type ProgramIdentityRow = {
+  id: number | string;
+  name: string;
+  is_active: boolean;
+};
+
+type DraftDayRow = {
+  id: number | string;
+  name: string;
+  subtitle: string | null;
+  day_order: number | string;
+};
+
+type DraftExerciseRelation = { name?: string | null } | { name?: string | null }[] | null;
+
+type DraftExerciseRow = {
+  id: number | string;
+  program_day_id: number | string;
+  exercise_id: number | string;
+  exercise_order: number | string;
+  target_sets: number | string | null;
+  min_reps: number | string | null;
+  max_reps: number | string | null;
+  notes: string | null;
+  exercise: DraftExerciseRelation;
+};
+
+export type SelectDraftProgram = (
+  userId: string,
+  programId: string,
+) => Promise<{ data: ProgramIdentityRow | null; error: { message?: string | null } | null }>;
+
+export type SelectActiveDraftProgram = (
+  userId: string,
+) => Promise<{ data: ProgramIdentityRow | null; error: { message?: string | null } | null }>;
+
+export type SelectDraftDays = (
+  programId: string,
+) => Promise<{ data: DraftDayRow[] | null; error: { message?: string | null } | null }>;
+
+export type SelectDraftExercises = (
+  dayIds: readonly string[],
+) => Promise<{ data: DraftExerciseRow[] | null; error: { message?: string | null } | null }>;
+
+export type ProgramDraftResult =
+  | { ok: true; draft: ProgramDraft; focusDayIndex: number; userId: string }
+  | { ok: false; error: string };
+
 const PROGRAM_COLUMNS = 'id, name, is_active';
-const EXERCISE_COLUMNS = 'id, name';
+const EXERCISE_COLUMNS = 'id, name, category, equipment_type';
+const DRAFT_DAY_COLUMNS = 'id, name, subtitle, day_order';
+const DRAFT_EXERCISE_COLUMNS =
+  'id, program_day_id, exercise_id, exercise_order, target_sets, min_reps, max_reps, notes, exercise:exercises ( name )';
 
 async function defaultGetUserId(): Promise<UserIdResult> {
   const module = await import('../current-user.ts');
@@ -61,7 +131,12 @@ async function defaultSelectExercises() {
     .select(EXERCISE_COLUMNS)
     .order('name', { ascending: true });
   return {
-    data: (result.data ?? null) as Array<{ id: number | string; name: string }> | null,
+    data: (result.data ?? null) as Array<{
+      id: number | string;
+      name: string;
+      category?: string | null;
+      equipment_type?: string | null;
+    }> | null,
     error: result.error,
   };
 }
@@ -107,9 +182,169 @@ export async function loadExerciseCatalog(io?: {
     data: (selected.data ?? []).map((row) => ({
       id: String(row.id),
       name: row.name,
+      muscle: muscleFromCategory(row.category),
+      equipment: equipmentFromType(row.equipment_type),
     })),
   };
 }
+
+function exerciseRelationName(value: DraftExerciseRelation): string {
+  const row = Array.isArray(value) ? value[0] : value;
+  const name = row?.name?.trim();
+  return name ? name : 'Exercise';
+}
+
+function draftQueryError(error: { message?: string | null } | null, fallback: string): string {
+  const message = error?.message?.trim();
+  return message ? message : fallback;
+}
+
+async function defaultSelectActiveProgram(userId: string) {
+  const { supabase } = await import('../supabase.ts');
+  const result = await supabase
+    .from('programs')
+    .select(PROGRAM_COLUMNS)
+    .eq('user_id', userId)
+    .eq('is_active', true)
+    .order('id', { ascending: true })
+    .limit(1);
+  const row = Array.isArray(result.data) ? (result.data[0] ?? null) : null;
+  return {
+    data: row as ProgramIdentityRow | null,
+    error: result.error,
+  };
+}
+
+async function defaultSelectDraftProgram(userId: string, programId: string) {
+  const { supabase } = await import('../supabase.ts');
+  const result = await supabase
+    .from('programs')
+    .select(PROGRAM_COLUMNS)
+    .eq('user_id', userId)
+    .eq('id', programId)
+    .maybeSingle();
+  return {
+    data: (result.data ?? null) as ProgramIdentityRow | null,
+    error: result.error,
+  };
+}
+
+async function defaultSelectDraftDays(programId: string) {
+  const { supabase } = await import('../supabase.ts');
+  const result = await supabase
+    .from('program_days')
+    .select(DRAFT_DAY_COLUMNS)
+    .eq('program_id', programId)
+    .order('day_order', { ascending: true });
+  return {
+    data: (result.data ?? null) as DraftDayRow[] | null,
+    error: result.error,
+  };
+}
+
+async function defaultSelectDraftExercises(dayIds: readonly string[]) {
+  const { supabase } = await import('../supabase.ts');
+  const result = await supabase
+    .from('program_exercises')
+    .select(DRAFT_EXERCISE_COLUMNS)
+    .in('program_day_id', [...dayIds]);
+  return {
+    data: (result.data ?? null) as DraftExerciseRow[] | null,
+    error: result.error,
+  };
+}
+
+export async function loadProgramDraftForCurrentUser(
+  target: { programId?: string; dayId?: string },
+  io?: {
+    getUserId?: () => Promise<UserIdResult>;
+    selectActiveProgram?: SelectActiveDraftProgram;
+    selectProgram?: SelectDraftProgram;
+    selectDays?: SelectDraftDays;
+    selectDraftExercises?: SelectDraftExercises;
+  },
+): Promise<ProgramDraftResult> {
+  const programId = target.programId?.trim();
+  const dayId = target.dayId?.trim();
+  if (programId && !acceptedDraftId(programId)) {
+    return { ok: false, error: DRAFT_ID_MESSAGE };
+  }
+  if (dayId && !acceptedDraftId(dayId)) {
+    return { ok: false, error: DAY_NOT_IN_ROUTINE_MESSAGE };
+  }
+  if (!programId && !dayId) {
+    return { ok: false, error: DRAFT_ID_MESSAGE };
+  }
+  const getUserId = io?.getUserId ?? defaultGetUserId;
+  const user = await getUserId();
+  if (!user.ok || user.data.trim() === '') {
+    return { ok: false, error: 'Sign in to edit a saved routine. Nothing was changed.' };
+  }
+  const selectActiveProgram = io?.selectActiveProgram ?? defaultSelectActiveProgram;
+  const selectProgram = io?.selectProgram ?? defaultSelectDraftProgram;
+  const selectDays = io?.selectDays ?? defaultSelectDraftDays;
+  const selectDraftExercises = io?.selectDraftExercises ?? defaultSelectDraftExercises;
+  const selectedProgram = programId
+    ? await selectProgram(user.data, programId)
+    : await selectActiveProgram(user.data);
+  if (selectedProgram.error) {
+    return { ok: false, error: draftQueryError(selectedProgram.error, 'Could not load this routine.') };
+  }
+  if (!selectedProgram.data) {
+    return {
+      ok: false,
+      error: programId ? 'That routine is not available. Nothing was changed.' : NO_ACTIVE_PROGRAM_MESSAGE,
+    };
+  }
+  const loadedProgramId = String(selectedProgram.data.id);
+  const daysResult = await selectDays(loadedProgramId);
+  if (daysResult.error) {
+    return { ok: false, error: draftQueryError(daysResult.error, 'Could not load this routine.') };
+  }
+  const dayRows = daysResult.data ?? [];
+  const dayIds = dayRows.map((day) => String(day.id));
+  const exerciseResult =
+    dayIds.length === 0
+      ? { data: [] as DraftExerciseRow[], error: null }
+      : await selectDraftExercises(dayIds);
+  if (exerciseResult.error) {
+    return { ok: false, error: draftQueryError(exerciseResult.error, 'Could not load this routine.') };
+  }
+  const assembled = assembleProgramDraft({
+    programId: loadedProgramId,
+    name: readDraftText(selectedProgram.data.name),
+    isActive: selectedProgram.data.is_active === true,
+    focusDayId: dayId,
+    days: dayRows.map((day) => ({
+      id: String(day.id),
+      name: readDraftText(day.name),
+      subtitle: day.subtitle,
+      dayOrder: readDraftNumber(day.day_order) ?? 0,
+    })),
+    exercises: (exerciseResult.data ?? []).map((row) => ({
+      id: String(row.id),
+      programDayId: String(row.program_day_id),
+      exerciseId: String(row.exercise_id),
+      name: exerciseRelationName(row.exercise),
+      order: readDraftNumber(row.exercise_order) ?? 0,
+      targetSets: readDraftNumber(row.target_sets),
+      minReps: readDraftNumber(row.min_reps),
+      maxReps: readDraftNumber(row.max_reps),
+      notes: row.notes,
+    })),
+  });
+  if (!assembled.ok) {
+    return assembled;
+  }
+  return {
+    ok: true,
+    draft: assembled.draft,
+    focusDayIndex: assembled.focusDayIndex,
+    userId: user.data,
+  };
+}
+
+export const MANUAL_SAVE_RPC_ENABLED = false;
 
 export const OWNED_PROGRAM_RPC_ENABLED = false;
 
@@ -133,7 +368,7 @@ export async function saveManualProgramForCurrentUser(
 ): Promise<SaveImportedProgramResult> {
   const getUserId = io?.getUserId ?? defaultGetUserId;
   const loadPrograms = io?.loadPrograms ?? (() => loadOwnedPrograms());
-  const rpc = io?.rpc ?? defaultSaveRpc;
+  const rpc = io?.rpc ?? (MANUAL_SAVE_RPC_ENABLED ? defaultSaveRpc : undefined);
   const ownedRpc = io?.ownedRpc ?? (OWNED_PROGRAM_RPC_ENABLED ? defaultOwnedSaveRpc : undefined);
   const user = await getUserId();
   if (!user.ok || user.data.trim() === '') {

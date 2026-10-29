@@ -1,13 +1,16 @@
 import { useCallback, useState } from 'react';
-import { StyleSheet, Text } from 'react-native';
-import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { Pressable, StyleSheet, Text } from 'react-native';
+import { Link, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
+import { EDIT_DAY_LABEL } from '@/lib/import/manual-program';
 import { loadActiveProgram } from '@/lib/programs';
 import { supabase } from '@/lib/supabase';
+import { buttonPaletteForSurface } from '@/lib/ui/button-contrast';
 
 const palette = Colors.dark;
+const primaryButton = buttonPaletteForSurface('dark');
 
 type ProgramDay = {
   id: string;
@@ -196,6 +199,22 @@ export default function ProgramDayScreen() {
             : programDay?.subtitle}
       </Text>
 
+      {!isLoading && !errorMessage && programDay ? (
+        <Link
+          href={{ pathname: '/program/build', params: { dayId: programDay.id } }}
+          asChild>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`${EDIT_DAY_LABEL}. ${programDay.name}`}
+            android_ripple={{ color: 'rgba(17, 17, 17, 0.18)' }}
+            style={styles.editButton}>
+            {({ pressed }) => (
+              <Text style={[styles.editLabel, pressed && styles.pressed]}>{EDIT_DAY_LABEL}</Text>
+            )}
+          </Pressable>
+        </Link>
+      ) : null}
+
       {isLoading ? (
         <Text style={styles.status}>Loading exercises...</Text>
       ) : errorMessage ? (
@@ -244,6 +263,22 @@ const styles = StyleSheet.create({
   error: {
     color: palette.text,
     fontSize: 16,
+  },
+  editButton: {
+    minHeight: 52,
+    borderRadius: 14,
+    backgroundColor: primaryButton.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  editLabel: {
+    color: primaryButton.label,
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  pressed: {
+    opacity: 0.72,
   },
   exerciseCard: {
     minHeight: 72,

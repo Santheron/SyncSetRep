@@ -1,12 +1,15 @@
 import {
   DAY_NAME_MAX,
   MAX_DAYS,
+  MAX_EXERCISES,
+  MAX_EXERCISES_PER_DAY,
   NOTE_EDIT_MAX,
   PROGRAM_NAME_MAX,
   REPS_MAX,
   REPS_MIN,
   SETS_MAX,
   SETS_MIN,
+  SOURCE_NAME_MAX,
   TEXT_FIELD_MAX,
 } from './limits.ts';
 import {
@@ -18,6 +21,7 @@ import {
   removeDay,
   removeExercise,
   renameDay,
+  nameUnsavedExercise,
   renameProgram,
   setDaySubtitle,
   setExerciseNotes,
@@ -33,10 +37,14 @@ import {
 } from './save-imported-program.ts';
 import { IMPORT_CAPACITY_MESSAGE } from './save-plan.ts';
 import { toSavePayload, type SaveImportedProgramPayload } from './save-payload.ts';
+import {
+  normalizeExerciseName,
+  type PlannedExercise,
+} from './planned-exercises.ts';
 
 // Manual routines use the same review state as an import preview.
 // They do not call a model or consume an import quota.
-// An additional routine stays on save_imported_program.
+// An additional routine uses save_imported_program only when that call is supplied.
 // The first routine uses save_owned_program only when that call is supplied.
 // Neither path creates a starter program.
 
@@ -45,6 +53,24 @@ export const FIRST_PROGRAM_NOTICE =
 
 export const FIRST_PROGRAM_UNAVAILABLE_MESSAGE =
   'Saving your first routine stays off until program setup is reviewed. Nothing was saved, and no starter program was created.';
+
+export const MANUAL_SAVE_UNAVAILABLE_MESSAGE =
+  'Saving a routine stays off in this build. Nothing was saved.';
+
+export const LOCAL_DAY_NOTICE =
+  'Days and exercises update on this screen right away. Save routine is the only step that would store them, and saving stays off in this build.';
+
+export const DAY_ADDED_LOCALLY_MESSAGE = 'Day added on this screen. Nothing has been saved.';
+
+export const EDIT_DRAFT_NOTICE =
+  'This is a local preview of a saved routine. You can rename days, change exercises, sets, reps, and notes here. Existing workout days, exercise definitions, and workout history stay as they are.';
+
+export const EDIT_SAVE_BLOCKED_MESSAGE =
+  'Saving edits stays off in this build. Nothing was changed.';
+
+export const EDIT_DAY_LABEL = 'Edit day';
+
+export const EDIT_ROUTINE_LABEL = 'Edit routine';
 
 export const ALREADY_CURRENT_PROGRAM_MESSAGE =
   'You already have a current program. Nothing was saved.';
@@ -59,6 +85,41 @@ export const MANUAL_SAVE_ONCE_MESSAGE = 'This screen will not save this routine 
 export const VIEW_SAVED_PROGRAMS_LABEL = 'View saved programs';
 
 export const MANUAL_SIGN_IN_SAVE_MESSAGE = 'Sign in before saving a routine. Nothing was saved.';
+
+export const MANUAL_CHOOSE_EXERCISE_MESSAGE =
+  'Choose an exercise for every movement before saving. Nothing was saved.';
+
+export const MANUAL_DUPLICATE_EXERCISE_MESSAGE =
+  'This day lists the same exercise twice. Choose a different exercise or remove one. Nothing was saved.';
+
+export const MANUAL_SETS_SAVE_MESSAGE =
+  `Enter sets from ${SETS_MIN} through ${SETS_MAX} for every exercise before saving. Nothing was saved.`;
+
+export const MANUAL_REPS_SAVE_MESSAGE =
+  `Enter rep min and max from ${REPS_MIN} through ${REPS_MAX} for every exercise before saving. Nothing was saved.`;
+
+export const MANUAL_REPS_ORDER_MESSAGE =
+  'Enter a rep minimum that is less than or equal to the rep maximum. Nothing was saved.';
+
+export const MANUAL_NAME_SAVE_MESSAGE =
+  `Enter a program name of 1 to ${PROGRAM_NAME_MAX} characters before saving. Nothing was saved.`;
+
+export const MANUAL_DAY_NAME_SAVE_MESSAGE =
+  `Enter a day name of 1 to ${DAY_NAME_MAX} characters before saving. Nothing was saved.`;
+
+export const MANUAL_EXERCISE_NAME_SAVE_MESSAGE =
+  `Enter an exercise name of 1 to ${PROGRAM_NAME_MAX} characters before saving. Nothing was saved.`;
+
+export const MANUAL_SUBTITLE_SAVE_MESSAGE =
+  `Enter a subtitle of ${TEXT_FIELD_MAX} characters or fewer before saving. Nothing was saved.`;
+
+export const MANUAL_NOTE_SAVE_MESSAGE =
+  `Shorten notes to ${NOTE_EDIT_MAX} characters or fewer before saving. Nothing was saved.`;
+
+export const MANUAL_CAPACITY_SAVE_MESSAGE =
+  'This routine has more days or exercises than can be saved. Nothing was saved.';
+
+export const MANUAL_EMPTY_DAYS_MESSAGE = 'Add at least one day before saving. Nothing was saved.';
 
 export const MANUAL_SIGN_IN_LIST_MESSAGE = 'Sign in to see your saved routines.';
 
@@ -98,6 +159,14 @@ export type OwnedProgramRow = {
 export type CatalogExercise = {
   id: string;
   name: string;
+  muscle?: string | null;
+  equipment?: string | null;
+  saved?: boolean;
+};
+
+export type CatalogFilters = {
+  muscle?: string | null;
+  equipment?: string | null;
 };
 
 export type OwnedProgramSaveRpc = (args: {
@@ -131,6 +200,7 @@ export type ManualEdit =
   | { type: 'remove-exercise'; dayIndex: number; exerciseIndex: number }
   | { type: 'move-exercise'; dayIndex: number; exerciseIndex: number; direction: 'up' | 'down' }
   | { type: 'choose-exercise'; dayIndex: number; exerciseIndex: number; exerciseId: string }
+  | { type: 'preview-exercise'; dayIndex: number; exerciseIndex: number; name: string }
   | { type: 'set-notes'; dayIndex: number; exerciseIndex: number; notes: string };
 
 export type ManualEditResult = {
@@ -193,12 +263,48 @@ export function requestProgramSwitch(
 export function filterCatalog(
   catalog: readonly CatalogExercise[],
   query: string,
+  filters?: CatalogFilters,
 ): CatalogExercise[] {
   const needle = query.trim().toLowerCase();
-  if (!needle) {
-    return [...catalog];
+  const muscle = filters?.muscle ?? null;
+  const equipment = filters?.equipment ?? null;
+  return catalog.filter((exercise) => {
+    if (muscle && exercise.muscle !== muscle) {
+      return false;
+    }
+    if (equipment && exercise.equipment !== equipment) {
+      return false;
+    }
+    if (!needle) {
+      return true;
+    }
+    return exercise.name.toLowerCase().includes(needle);
+  });
+}
+
+export function mergeExerciseChoices(
+  library: readonly CatalogExercise[],
+  planned: readonly PlannedExercise[],
+): CatalogExercise[] {
+  const savedNames = new Set(library.map((exercise) => normalizeExerciseName(exercise.name)));
+  const choices: CatalogExercise[] = library.map((exercise) => ({
+    ...exercise,
+    saved: true,
+  }));
+  for (const exercise of planned) {
+    if (savedNames.has(normalizeExerciseName(exercise.name))) {
+      continue;
+    }
+    choices.push({
+      id: `planned:${normalizeExerciseName(exercise.name).replace(/ /g, '-')}`,
+      name: exercise.name,
+      muscle: exercise.muscle,
+      equipment: exercise.equipment,
+      saved: false,
+    });
   }
-  return catalog.filter((exercise) => exercise.name.toLowerCase().includes(needle));
+  choices.sort((left, right) => left.name.localeCompare(right.name));
+  return choices;
 }
 
 export function dayNameLabel(dayNumber: number): string {
@@ -258,7 +364,11 @@ export function notesLabel(dayNumber: number, exerciseNumber: number): string {
 export function exerciseChoiceText(
   exerciseId: string | number | null,
   catalog: readonly CatalogExercise[],
+  sourceName?: string | null,
 ): string {
+  if ((exerciseId == null || exerciseId === '') && sourceName && sourceName.trim() !== '') {
+    return sourceName.trim();
+  }
   if (exerciseId == null || exerciseId === '') {
     return CHOOSE_EXERCISE_LABEL;
   }
@@ -333,6 +443,17 @@ export function applyManualEdit(review: ProgramReview, edit: ManualEdit): Manual
       error: null,
     };
   }
+  if (edit.type === 'preview-exercise') {
+    return {
+      review: nameUnsavedExercise(
+        review,
+        edit.dayIndex,
+        edit.exerciseIndex,
+        edit.name.slice(0, SOURCE_NAME_MAX),
+      ),
+      error: null,
+    };
+  }
   return {
     review: setExerciseNotes(review, edit.dayIndex, edit.exerciseIndex, edit.notes.slice(0, NOTE_EDIT_MAX)),
     error: null,
@@ -382,6 +503,174 @@ function ownedProgramId(data: unknown): string | null {
   return null;
 }
 
+function pushMessage(errors: string[], message: string) {
+  if (!errors.includes(message)) {
+    errors.push(message);
+  }
+}
+
+function acceptedManualInt(
+  field: { acceptance: string; value: number | null },
+  min: number,
+  max: number,
+): number | null {
+  const accepted =
+    field.acceptance === 'extracted' ||
+    field.acceptance === 'accepted_suggestion' ||
+    field.acceptance === 'user_entered';
+  if (!accepted || typeof field.value !== 'number' || !Number.isInteger(field.value)) {
+    return null;
+  }
+  if (field.value < min || field.value > max) {
+    return null;
+  }
+  return field.value;
+}
+
+/** A database exercise id that save_imported_program can store. Planned and custom names are not ids. */
+export function storedExerciseId(value: string | number | null | undefined): string | null {
+  let text: string;
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 1) {
+      return null;
+    }
+    text = String(value);
+  } else if (typeof value === 'string') {
+    text = value;
+  } else {
+    return null;
+  }
+  if (!/^[1-9][0-9]*$/.test(text) || text.length > 15) {
+    return null;
+  }
+  const parsed = Number(text);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    return null;
+  }
+  return text;
+}
+
+function customExerciseName(value: string | null): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const name = value.trim();
+  if (name.length < 1 || name.length > PROGRAM_NAME_MAX) {
+    return null;
+  }
+  if (normalizeExerciseName(name) === '') {
+    return null;
+  }
+  return name;
+}
+
+export function routineUsesStoredExerciseIds(review: ProgramReview): boolean {
+  return review.days.every((day) =>
+    day.exercises.every((exercise) => storedExerciseId(exercise.exerciseId) != null),
+  );
+}
+
+export function validateManualRoutine(
+  review: ProgramReview,
+): { ok: true } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const programName = typeof review.programName === 'string' ? review.programName.trim() : '';
+  if (programName.length < 1 || programName.length > PROGRAM_NAME_MAX) {
+    pushMessage(errors, MANUAL_NAME_SAVE_MESSAGE);
+  }
+
+  const days = Array.isArray(review.days) ? review.days : [];
+  if (days.length === 0) {
+    pushMessage(errors, MANUAL_EMPTY_DAYS_MESSAGE);
+  }
+  if (days.length > MAX_DAYS) {
+    pushMessage(errors, MANUAL_CAPACITY_SAVE_MESSAGE);
+  }
+
+  let total = 0;
+  for (const day of days) {
+    const name = typeof day.name === 'string' ? day.name.trim() : '';
+    if (name.length < 1 || name.length > DAY_NAME_MAX) {
+      pushMessage(errors, MANUAL_DAY_NAME_SAVE_MESSAGE);
+    }
+    const subtitle = typeof day.subtitle === 'string' ? day.subtitle.trim() : '';
+    if (subtitle.length > TEXT_FIELD_MAX) {
+      pushMessage(errors, MANUAL_SUBTITLE_SAVE_MESSAGE);
+    }
+
+    const exercises = Array.isArray(day.exercises) ? day.exercises : [];
+    total += exercises.length;
+    if (exercises.length > MAX_EXERCISES_PER_DAY) {
+      pushMessage(errors, MANUAL_CAPACITY_SAVE_MESSAGE);
+    }
+
+    const seen = new Set<string>();
+    for (const exercise of exercises) {
+      const storedId = storedExerciseId(exercise.exerciseId);
+      const named = customExerciseName(exercise.sourceName);
+      if (storedId != null) {
+        const key = `id:${storedId}`;
+        if (seen.has(key)) {
+          pushMessage(errors, MANUAL_DUPLICATE_EXERCISE_MESSAGE);
+        } else {
+          seen.add(key);
+        }
+      } else if (named != null) {
+        const key = `name:${normalizeExerciseName(named)}`;
+        if (seen.has(key)) {
+          pushMessage(errors, MANUAL_DUPLICATE_EXERCISE_MESSAGE);
+        } else {
+          seen.add(key);
+        }
+      } else if (typeof exercise.sourceName === 'string' && exercise.sourceName.trim() !== '') {
+        pushMessage(errors, MANUAL_EXERCISE_NAME_SAVE_MESSAGE);
+      } else {
+        pushMessage(errors, MANUAL_CHOOSE_EXERCISE_MESSAGE);
+      }
+
+      const sets = acceptedManualInt(exercise.sets, SETS_MIN, SETS_MAX);
+      const repsMin = acceptedManualInt(exercise.repsMin, REPS_MIN, REPS_MAX);
+      const repsMax = acceptedManualInt(exercise.repsMax, REPS_MIN, REPS_MAX);
+      if (sets == null) {
+        pushMessage(errors, MANUAL_SETS_SAVE_MESSAGE);
+      }
+      if (repsMin == null || repsMax == null) {
+        pushMessage(errors, MANUAL_REPS_SAVE_MESSAGE);
+      } else if (repsMin > repsMax) {
+        pushMessage(errors, MANUAL_REPS_ORDER_MESSAGE);
+      }
+
+      const notes = typeof exercise.notes === 'string' ? exercise.notes.trim() : '';
+      if (notes.length > NOTE_EDIT_MAX) {
+        pushMessage(errors, MANUAL_NOTE_SAVE_MESSAGE);
+      }
+    }
+  }
+
+  if (total > MAX_EXERCISES) {
+    pushMessage(errors, MANUAL_CAPACITY_SAVE_MESSAGE);
+  }
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+  return { ok: true };
+}
+
+function previewForStoredSave(review: ProgramReview) {
+  const preview = toImportPreview(review);
+  return {
+    ...preview,
+    issues: [],
+    days: preview.days.map((day) => ({
+      ...day,
+      exercises: day.exercises.map((exercise) => ({
+        ...exercise,
+        matchStatus: 'manual' as const,
+      })),
+    })),
+  };
+}
+
 function ownedSaveError(message: string | null | undefined): string {
   const text = message ?? '';
   if (text.includes('Not authenticated')) {
@@ -393,24 +682,46 @@ function ownedSaveError(message: string | null | undefined): string {
   return 'Could not save this routine. Nothing was saved.';
 }
 
+export function previewProgramEdit(
+  review: ProgramReview,
+  userId: string,
+): { ok: false; errors: string[] } {
+  if (userId.trim() === '') {
+    return { ok: false, errors: [MANUAL_SIGN_IN_SAVE_MESSAGE] };
+  }
+  const valid = validateManualRoutine(review);
+  if (!valid.ok) {
+    return valid;
+  }
+  return { ok: false, errors: [EDIT_SAVE_BLOCKED_MESSAGE] };
+}
+
 export async function saveManualProgram(
   review: ProgramReview,
   options: {
     userId: string;
     programs: readonly SavedProgramSummary[];
-    rpc: ImportSaveRpc;
+    rpc?: ImportSaveRpc;
     ownedRpc?: OwnedProgramSaveRpc;
   },
 ): Promise<SaveImportedProgramResult> {
+  if (typeof options.userId !== 'string' || options.userId.trim() === '') {
+    return { ok: false, errors: [MANUAL_SIGN_IN_SAVE_MESSAGE] };
+  }
+  const valid = validateManualRoutine(review);
+  if (!valid.ok) {
+    return valid;
+  }
+  const canStoreIds = routineUsesStoredExerciseIds(review);
   if (!hasCurrentProgram(options.programs)) {
-    const payload = toSavePayload(toImportPreview(review), options.userId, {
+    if (!options.ownedRpc || !canStoreIds) {
+      return { ok: false, errors: [FIRST_PROGRAM_UNAVAILABLE_MESSAGE] };
+    }
+    const payload = toSavePayload(previewForStoredSave(review), options.userId, {
       hasActiveProgram: true,
     });
     if (!payload.ok) {
       return payload;
-    }
-    if (!options.ownedRpc) {
-      return { ok: false, errors: [FIRST_PROGRAM_UNAVAILABLE_MESSAGE] };
     }
     let response: { data: unknown; error: { message?: string | null } | null };
     try {
@@ -430,7 +741,10 @@ export async function saveManualProgram(
     }
     return { ok: true, programId };
   }
-  return saveImportedProgram(toImportPreview(review), {
+  if (!options.rpc || !canStoreIds) {
+    return { ok: false, errors: [MANUAL_SAVE_UNAVAILABLE_MESSAGE] };
+  }
+  return saveImportedProgram(previewForStoredSave(review), {
     userId: options.userId,
     hasActiveProgram: true,
     rpc: options.rpc,

@@ -1,13 +1,15 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   FlatList,
   Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { Link } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
@@ -17,7 +19,10 @@ import {
   ADD_DAY_LABEL,
   ADD_EXERCISE_LABEL,
   CHOOSE_EXERCISE_LABEL,
+  DAY_ADDED_LOCALLY_MESSAGE,
+  EDIT_DRAFT_NOTICE,
   FIRST_PROGRAM_NOTICE,
+  LOCAL_DAY_NOTICE,
   MANUAL_SAVE_ONCE_MESSAGE,
   MANUAL_SAVED_CURRENT_MESSAGE,
   MANUAL_SAVED_INACTIVE_MESSAGE,
@@ -25,6 +30,7 @@ import {
   SAVE_FIRST_ROUTINE_LABEL,
   SAVE_ROUTINE_LABEL,
   VIEW_SAVED_PROGRAMS_LABEL,
+  mergeExerciseChoices,
   addExerciseLabel,
   applyManualEdit,
   applyManualNumber,
@@ -44,6 +50,12 @@ import {
   type CatalogExercise,
   type ManualEdit,
 } from '@/lib/import/manual-program';
+import {
+  EQUIPMENT_TYPES,
+  MUSCLE_GROUPS,
+  PLANNED_EXERCISES,
+  normalizeExerciseName,
+} from '@/lib/import/planned-exercises';
 import type { ProgramReview } from '@/lib/import/review-editor';
 
 const palette = Colors.dark;
@@ -52,6 +64,8 @@ type ManualProgramBuilderProps = {
   review: ProgramReview;
   catalog: readonly CatalogExercise[];
   hasActiveProgram: boolean;
+  editing?: boolean;
+  focusDayIndex?: number | null;
   isSaving: boolean;
   saveErrors: readonly string[];
   savedProgramId: string | null;
@@ -67,16 +81,24 @@ export function ManualProgramBuilder({
   review,
   catalog,
   hasActiveProgram,
+  editing = false,
+  focusDayIndex = null,
   isSaving,
   saveErrors,
   savedProgramId,
   onChange,
   onSave,
 }: ManualProgramBuilderProps) {
+  const scrollRef = useRef<ScrollView>(null);
+  const dayOffsets = useRef<Record<number, number>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [fieldError, setFieldError] = useState<string | null>(null);
+  const [localStatus, setLocalStatus] = useState<string | null>(null);
+  const [pendingScrollDay, setPendingScrollDay] = useState<number | null>(focusDayIndex);
   const [picker, setPicker] = useState<{ dayIndex: number; exerciseIndex: number } | null>(null);
   const [catalogQuery, setCatalogQuery] = useState('');
+  const [muscleFilter, setMuscleFilter] = useState<string | null>(null);
+  const [equipmentFilter, setEquipmentFilter] = useState<string | null>(null);
 
   function edit(next: ManualEdit) {
     if (savedProgramId != null) {
@@ -84,11 +106,31 @@ export function ManualProgramBuilder({
     }
     const result = applyManualEdit(review, next);
     setFieldError(result.error);
+    if (result.error) {
+      return;
+    }
+    if (next.type === 'add-day') {
+      setLocalStatus(DAY_ADDED_LOCALLY_MESSAGE);
+      setPendingScrollDay(result.review.days.length - 1);
+    } else if (next.type === 'remove-day' || next.type === 'move-day' || next.type === 'rename-day') {
+      setLocalStatus(null);
+    }
     if (result.review !== review) {
       setDrafts({});
       onChange(result.review);
     }
   }
+
+  useEffect(() => {
+    if (pendingScrollDay == null) {
+      return;
+    }
+    const y = dayOffsets.current[pendingScrollDay];
+    if (y == null) {
+      return;
+    }
+    scrollRef.current?.scrollTo({ y: Math.max(0, y - 12), animated: true });
+  }, [pendingScrollDay, review.days.length]);
 
   function changeNumber(
     dayIndex: number,
@@ -119,19 +161,35 @@ export function ManualProgramBuilder({
     }
   }
 
-  const catalogMatches = filterCatalog(catalog, catalogQuery);
-  const saveLabel = hasActiveProgram ? SAVE_ROUTINE_LABEL : SAVE_FIRST_ROUTINE_LABEL;
+  const choices = mergeExerciseChoices(catalog, PLANNED_EXERCISES);
+  const catalogMatches = filterCatalog(choices, catalogQuery, {
+    muscle: muscleFilter,
+    equipment: equipmentFilter,
+  });
+  const customName = catalogQuery.trim();
+  const customKey = normalizeExerciseName(customName);
+  const customReady =
+    customName.length >= 1 &&
+    customName.length <= PROGRAM_NAME_MAX &&
+    customKey !== '' &&
+    !choices.some((exercise) => normalizeExerciseName(exercise.name) === customKey);
+  const saveLabel = editing || hasActiveProgram ? SAVE_ROUTINE_LABEL : SAVE_FIRST_ROUTINE_LABEL;
   const savedMessage = hasActiveProgram ? MANUAL_SAVED_INACTIVE_MESSAGE : MANUAL_SAVED_CURRENT_MESSAGE;
 
   return (
-    <Screen keyboardShouldPersistTaps="handled">
-      <Text style={styles.title}>Build a routine</Text>
-      <Text style={styles.subtitle}>
-        {hasActiveProgram
-          ? 'This creates a saved routine and leaves your current program and workout history unchanged.'
-          : 'This routine would become your current program. Workout history stays unchanged.'}
+    <Screen ref={scrollRef} keyboardShouldPersistTaps="handled">
+      <Text style={styles.title}>{editing ? 'Edit routine' : 'Build a routine'}</Text>
+      <Text accessibilityLabel={LOCAL_DAY_NOTICE} style={styles.subtitle}>
+        {LOCAL_DAY_NOTICE}
       </Text>
-      {hasActiveProgram ? null : (
+      <Text style={styles.subtitle}>
+        {editing
+          ? EDIT_DRAFT_NOTICE
+          : hasActiveProgram
+            ? 'This creates a saved routine and leaves your current program and workout history unchanged.'
+            : 'This routine would become your current program. Workout history stays unchanged.'}
+      </Text>
+      {editing || hasActiveProgram ? null : (
         <Text accessibilityLabel={FIRST_PROGRAM_NOTICE} style={styles.notice}>
           {FIRST_PROGRAM_NOTICE}
         </Text>
@@ -154,8 +212,18 @@ export function ManualProgramBuilder({
       {review.days.map((day, dayIndex) => {
         const dayNumber = dayIndex + 1;
         return (
-          <Card key={`day-${dayIndex}`} style={styles.dayCard}>
+          <Card
+            key={`day-${dayIndex}`}
+            onLayout={(event) => {
+              const y = event.nativeEvent.layout.y;
+              dayOffsets.current[dayIndex] = y;
+              if (pendingScrollDay === dayIndex) {
+                scrollRef.current?.scrollTo({ y: Math.max(0, y - 12), animated: true });
+              }
+            }}
+            style={styles.dayCard}>
             <Text style={styles.dayHeading}>Day {dayNumber}</Text>
+            <Text style={styles.fieldLabel}>Day name</Text>
             <TextInput
               accessibilityLabel={dayNameLabel(dayNumber)}
               maxLength={DAY_NAME_MAX}
@@ -212,11 +280,13 @@ export function ManualProgramBuilder({
                     accessibilityLabel={chooseExerciseLabel(dayNumber, exerciseNumber)}
                     onPress={() => {
                       setCatalogQuery('');
+                      setMuscleFilter(null);
+                      setEquipmentFilter(null);
                       setPicker({ dayIndex, exerciseIndex });
                     }}
                     style={({ pressed }) => [styles.choice, pressed && styles.pressed]}>
                     <Text style={styles.choiceLabel}>
-                      {exerciseChoiceText(exercise.exerciseId, catalog)}
+                      {exerciseChoiceText(exercise.exerciseId, choices, exercise.sourceName)}
                     </Text>
                   </Pressable>
                   <View style={styles.row}>
@@ -320,9 +390,11 @@ export function ManualProgramBuilder({
         accessibilityRole="button"
         accessibilityLabel={ADD_DAY_LABEL}
         onPress={() => edit({ type: 'add-day' })}
-        style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
-        <Text style={styles.secondaryButtonLabel}>{ADD_DAY_LABEL}</Text>
+        style={({ pressed }) => [styles.addDayButton, pressed && styles.pressed]}>
+        <MaterialIcons color={palette.accent} name="add" size={22} />
+        <Text style={styles.addDayLabel}>{ADD_DAY_LABEL}</Text>
       </Pressable>
+      {localStatus ? <Text style={styles.notice}>{localStatus}</Text> : null}
       </View>
 
       {fieldError ? <Text style={styles.error}>{fieldError}</Text> : null}
@@ -351,8 +423,12 @@ export function ManualProgramBuilder({
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={VIEW_SAVED_PROGRAMS_LABEL}
-            style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}>
-            <Text style={styles.primaryButtonLabel}>{VIEW_SAVED_PROGRAMS_LABEL}</Text>
+            style={styles.primaryButton}>
+            {({ pressed }) => (
+              <Text style={[styles.primaryButtonLabel, pressed && styles.pressed]}>
+                {VIEW_SAVED_PROGRAMS_LABEL}
+              </Text>
+            )}
           </Pressable>
         </Link>
       )}
@@ -373,6 +449,58 @@ export function ManualProgramBuilder({
               style={styles.input}
               value={catalogQuery}
             />
+            <View style={styles.filterWrap}>
+              <FilterChip
+                label="All muscles"
+                selected={muscleFilter == null}
+                onPress={() => setMuscleFilter(null)}
+              />
+              {MUSCLE_GROUPS.map((muscle) => (
+                <FilterChip
+                  key={muscle}
+                  label={muscle}
+                  selected={muscleFilter === muscle}
+                  onPress={() => setMuscleFilter(muscle)}
+                />
+              ))}
+            </View>
+            <View style={styles.filterWrap}>
+              <FilterChip
+                label="All equipment"
+                selected={equipmentFilter == null}
+                onPress={() => setEquipmentFilter(null)}
+              />
+              {EQUIPMENT_TYPES.map((equipment) => (
+                <FilterChip
+                  key={equipment}
+                  label={equipment}
+                  selected={equipmentFilter === equipment}
+                  onPress={() => setEquipmentFilter(equipment)}
+                />
+              ))}
+            </View>
+            <Text style={styles.filterCount}>{catalogMatches.length} exercises</Text>
+            {customReady ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Use ${customName}`}
+                onPress={() => {
+                  if (!picker) {
+                    return;
+                  }
+                  edit({
+                    type: 'preview-exercise',
+                    dayIndex: picker.dayIndex,
+                    exerciseIndex: picker.exerciseIndex,
+                    name: customName,
+                  });
+                  setPicker(null);
+                }}
+                style={styles.catalogRow}>
+                <Text style={styles.choiceLabel}>Use "{customName}"</Text>
+                <Text style={styles.catalogMeta}>Your exercise · Not saved to the library yet</Text>
+              </Pressable>
+            ) : null}
             <FlatList
               data={catalogMatches}
               keyboardShouldPersistTaps="handled"
@@ -385,16 +513,29 @@ export function ManualProgramBuilder({
                     if (!picker) {
                       return;
                     }
-                    edit({
-                      type: 'choose-exercise',
-                      dayIndex: picker.dayIndex,
-                      exerciseIndex: picker.exerciseIndex,
-                      exerciseId: item.id,
-                    });
+                    if (item.saved === false) {
+                      edit({
+                        type: 'preview-exercise',
+                        dayIndex: picker.dayIndex,
+                        exerciseIndex: picker.exerciseIndex,
+                        name: item.name,
+                      });
+                    } else {
+                      edit({
+                        type: 'choose-exercise',
+                        dayIndex: picker.dayIndex,
+                        exerciseIndex: picker.exerciseIndex,
+                        exerciseId: item.id,
+                      });
+                    }
                     setPicker(null);
                   }}
                   style={({ pressed }) => [styles.catalogRow, pressed && styles.pressed]}>
                   <Text style={styles.choiceLabel}>{item.name}</Text>
+                  <Text style={styles.catalogMeta}>
+                    {[item.muscle, item.equipment].filter(Boolean).join(' · ')}
+                    {item.saved === false ? ' · Not in the saved library yet' : ''}
+                  </Text>
                 </Pressable>
               )}
               style={styles.catalogList}
@@ -410,6 +551,31 @@ export function ManualProgramBuilder({
         </View>
       </Modal>
     </Screen>
+  );
+}
+
+function FilterChip({
+  label,
+  selected,
+  onPress,
+}: {
+  label: string;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ selected }}
+      accessibilityLabel={label}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.filterChip,
+        selected && styles.filterChipSelected,
+        pressed && styles.pressed,
+      ]}>
+      <Text style={[styles.filterChipLabel, selected && styles.filterChipLabelSelected]}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -512,6 +678,57 @@ const styles = StyleSheet.create({
     color: palette.text,
     fontSize: 16,
     fontWeight: '700',
+  },
+  addDayButton: {
+    minHeight: 52,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: palette.accent,
+    backgroundColor: palette.card,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+  },
+  addDayLabel: {
+    color: palette.accent,
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  filterWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  filterChip: {
+    minHeight: 40,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: palette.border,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  filterChipSelected: {
+    backgroundColor: palette.accent,
+    borderColor: palette.accent,
+  },
+  filterChipLabel: {
+    color: palette.text,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  filterChipLabelSelected: {
+    color: palette.accentText,
+  },
+  filterCount: {
+    color: palette.muted,
+    fontSize: 14,
+  },
+  catalogMeta: {
+    color: palette.muted,
+    fontSize: 13,
   },
   primaryButton: {
     minHeight: 52,

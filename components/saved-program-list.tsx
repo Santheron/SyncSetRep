@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Link } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
 import {
+  EDIT_ROUTINE_LABEL,
   requestProgramSwitch,
   savedProgramListItems,
   UNFINISHED_WORKOUT_SWITCH_MESSAGE,
@@ -66,6 +68,18 @@ export function SavedProgramList({
             {item.statusLabel}
           </Text>
           <Text style={styles.name}>{item.name}</Text>
+          <Link
+            href={{ pathname: '/program/build', params: { programId: item.id } }}
+            asChild>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`${EDIT_ROUTINE_LABEL}. ${item.name}`}
+              style={styles.editButton}>
+              {({ pressed }) => (
+                <Text style={[styles.editLabel, pressed && styles.pressed]}>{EDIT_ROUTINE_LABEL}</Text>
+              )}
+            </Pressable>
+          </Link>
           {item.offerSwitch ? (
             <Pressable
               accessibilityRole="button"
@@ -148,6 +162,22 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '700',
     marginTop: 6,
+  },
+  editButton: {
+    minHeight: 48,
+    marginTop: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.card,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  editLabel: {
+    color: palette.text,
+    fontSize: 16,
+    fontWeight: '700',
   },
   switchButton: {
     minHeight: 48,
