@@ -64,20 +64,46 @@ assert.equal(/\b(insert|update|delete)\b/i.test(dayOrderRollbackSql), false);
 
 const saveSql = stripSql(files.save);
 assert.match(saveSql, /SECURITY INVOKER/);
-assert.match(saveSql, /SET search_path = public/);
+assert.match(saveSql, /SET search_path = ''/);
+assert.equal(/SET search_path = public/.test(saveSql), false);
+assert.match(saveSql, /SET LOCAL lock_timeout = '5s'/);
+assert.match(saveSql, /SET LOCAL statement_timeout = '30s'/);
 assert.match(saveSql, /auth\.uid\(\)/);
+assert.match(saveSql, /pg_catalog\.btrim/);
+assert.match(saveSql, /pg_catalog\.char_length/);
+assert.match(saveSql, /\bNULLIF\(/);
+assert.match(saveSql, /pg_catalog\.ltrim/);
+assert.match(saveSql, /pg_catalog\.array_append/);
+assert.match(saveSql, /pg_catalog\.jsonb_typeof/);
+assert.match(saveSql, /pg_catalog\.jsonb_object_keys/);
+assert.match(saveSql, /pg_catalog\.jsonb_array_length/);
+assert.match(saveSql, /pg_catalog\.jsonb_array_elements/);
+assert.match(saveSql, /pg_catalog\.jsonb_build_object/);
+assert.match(saveSql, /pg_catalog\.jsonb_build_array/);
 assert.match(saveSql, /is_active/);
 assert.match(saveSql, /FOR UPDATE/);
 assert.match(saveSql, /invalid_import: inverted_reps/);
 assert.match(saveSql, /active_program_required/);
 assert.match(saveSql, /VALUES \(uid, program_name, NULL, false\)/);
-assert.match(saveSql, new RegExp(`char_length\\(day_subtitle\\) > ${TEXT_FIELD_MAX}`));
+assert.match(saveSql, new RegExp(`pg_catalog\\.char_length\\(day_subtitle\\) > ${TEXT_FIELD_MAX}`));
 assert.match(saveSql, /9223372036854775807/);
 assert.equal(/\bsecurity definer\b/i.test(saveSql), false);
 assert.equal(/\bupdate\s+(public|only)\b/i.test(saveSql), false);
 assert.equal(/\bdelete\s+from\b/i.test(saveSql), false);
 assert.equal(/\bcopy_starter_program\b/i.test(saveSql), false);
 assert.equal(stripSql(files.saveRollback).includes('DROP FUNCTION IF EXISTS public.save_imported_program(jsonb)'), true);
+const SAVE_PROGRAM_BODY_MD5 = 'ab614932badcedfc0c71eb1ee6d00087';
+const SAVE_PROGRAM_DEFINITION_MD5 = '6275a18bdc001065d7ad77c0c4d52fbb';
+const saveVerifySql = stripSql(readSql('ai-import-save-program-verify.sql'));
+assert.match(saveVerifySql, /default_transaction_read_only/);
+assert.match(saveVerifySql, new RegExp(SAVE_PROGRAM_BODY_MD5));
+assert.match(saveVerifySql, new RegExp(SAVE_PROGRAM_DEFINITION_MD5));
+assert.match(saveVerifySql, /search_path=""/);
+assert.equal(/\binsert\s+into\b/i.test(saveVerifySql), false);
+assert.equal(/\bupdate\s+(public|only)\b/i.test(saveVerifySql), false);
+assert.equal(/\bdelete\s+from\b/i.test(saveVerifySql), false);
+assert.equal(/\b(create|alter|drop|grant|revoke)\b/i.test(saveVerifySql), false);
+assert.equal(/select\s+public\.save_imported_program\s*\(/i.test(saveVerifySql), false);
 
 const quotaSql = stripSql(files.quota);
 assert.match(quotaSql, /SECURITY DEFINER/);
@@ -481,14 +507,45 @@ async function runBehavior(PGlite: new () => PgLike) {
   };
   assert.equal(preflightJson.duplicate_groups, 0);
 
+  const saveTimeoutsBefore = await db.query<{ lock_timeout: string; statement_timeout: string }>(`
+    SELECT current_setting('lock_timeout') AS lock_timeout,
+           current_setting('statement_timeout') AS statement_timeout
+  `);
   await execFile(db, 'ai-import-save-program.sql');
-  const functionFlags = await db.query<{ security_definer: boolean; config: string[] | null }>(`
-    SELECT prosecdef AS security_definer, proconfig AS config
-    FROM pg_proc
-    WHERE proname = 'save_imported_program'
+  const saveTimeoutsAfter = await db.query<{ lock_timeout: string; statement_timeout: string }>(`
+    SELECT current_setting('lock_timeout') AS lock_timeout,
+           current_setting('statement_timeout') AS statement_timeout
+  `);
+  assert.deepEqual(saveTimeoutsAfter.rows[0], saveTimeoutsBefore.rows[0]);
+  const functionFlags = await db.query<{
+    security_definer: boolean;
+    config: string[] | null;
+    identity_arguments: string;
+    language_name: string;
+    body_md5: string;
+    definition_md5: string;
+  }>(`
+    SELECT
+      proc.prosecdef AS security_definer,
+      proc.proconfig AS config,
+      pg_get_function_identity_arguments(proc.oid) AS identity_arguments,
+      lang.lanname AS language_name,
+      md5(proc.prosrc) AS body_md5,
+      md5(pg_get_functiondef(proc.oid)) AS definition_md5
+    FROM pg_proc proc
+    JOIN pg_language lang ON lang.oid = proc.prolang
+    WHERE proc.proname = 'save_imported_program'
   `);
   assert.equal(functionFlags.rows[0]?.security_definer, false);
-  assert.equal(functionFlags.rows[0]?.config?.includes('search_path=public'), true);
+  assert.equal(functionFlags.rows[0]?.config?.includes('search_path=public'), false);
+  assert.equal(
+    functionFlags.rows[0]?.config?.some((entry) => entry.replace(/\s/g, '') === 'search_path=' || entry === 'search_path=""'),
+    true,
+  );
+  assert.equal(functionFlags.rows[0]?.identity_arguments, 'p_program jsonb');
+  assert.equal(functionFlags.rows[0]?.language_name, 'plpgsql');
+  assert.equal(functionFlags.rows[0]?.body_md5, SAVE_PROGRAM_BODY_MD5);
+  assert.equal(functionFlags.rows[0]?.definition_md5, SAVE_PROGRAM_DEFINITION_MD5);
 
   const saved = await asUser<{ id: number }>(db, USER_A, payload(importedProgram));
   const savedId = Number(saved[0]?.id);
@@ -520,6 +577,49 @@ async function runBehavior(PGlite: new () => PgLike) {
     `)).rows,
     beforeHistory.rows,
   );
+
+  const duplicateDays = await asUser<{ id: number }>(db, USER_A, payload(JSON.stringify({
+    name: 'Same names',
+    days: [
+      { name: 'Push', exercises: [] },
+      { name: 'Push', exercises: [] },
+    ],
+  })));
+  const duplicateDayId = Number(duplicateDays[0]?.id);
+  const duplicateDayRows = await db.query<{ day_order: number; name: string; exercises: number }>(`
+    SELECT d.day_order, d.name, count(e.id)::int AS exercises
+    FROM public.program_days d
+    LEFT JOIN public.program_exercises e ON e.program_day_id = d.id
+    WHERE d.program_id = ${duplicateDayId}
+    GROUP BY d.id, d.day_order, d.name
+    ORDER BY d.day_order
+  `);
+  assert.deepEqual(duplicateDayRows.rows, [
+    { day_order: 1, name: 'Push', exercises: 0 },
+    { day_order: 2, name: 'Push', exercises: 0 },
+  ]);
+  const activeAfterDuplicateDays = await db.query<{ id: number; is_active: boolean }>(`
+    SELECT id, is_active FROM public.programs WHERE id = 1
+  `);
+  assert.deepEqual(activeAfterDuplicateDays.rows, [{ id: 1, is_active: true }]);
+  assertHistoryUntouched(await preservedRows(db), preserved);
+
+  const programsBeforeRollback = await db.query<{ programs: number }>(`
+    SELECT count(*)::int AS programs FROM public.programs
+  `);
+  await db.exec('BEGIN');
+  await db.exec(`SELECT set_config('request.jwt.claim.sub', '${USER_A}', true)`);
+  await db.exec('SET LOCAL ROLE authenticated');
+  await db.query(payload(JSON.stringify({
+    name: 'Rollback me',
+    days: [{ name: 'Day', exercises: [] }],
+  })));
+  await db.exec('ROLLBACK');
+  const programsAfterRollback = await db.query<{ programs: number }>(`
+    SELECT count(*)::int AS programs FROM public.programs
+  `);
+  assert.deepEqual(programsAfterRollback.rows, programsBeforeRollback.rows);
+  assertHistoryUntouched(await preservedRows(db), preserved);
 
   const beforeFailed = await db.query<{ programs: number; days: number }>(`
     SELECT

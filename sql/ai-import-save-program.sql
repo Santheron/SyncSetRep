@@ -7,16 +7,22 @@
 -- Does not read or write history. Does not write rest_seconds.
 -- Subtitle matches the draft text field: trimmed, empty becomes null, longer than 2000 is rejected.
 -- A day with an empty exercise list is saved. The TypeScript save plan allows that rest day.
+-- Duplicate day names are saved. day_order is assigned in payload order on the new program.
 -- Numeric text is range-checked before it is cast, including values above integer and bigint limits.
+-- search_path is empty. Tables, auth.uid(), and PostgreSQL built-ins are schema-qualified.
+-- lock_timeout and statement_timeout are SET LOCAL and end when this transaction commits.
 -- Requires sql/ai-import-day-order.sql first, so two programs may both use day_order 1.
 
 BEGIN;
+
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
 
 CREATE OR REPLACE FUNCTION public.save_imported_program(p_program jsonb)
 RETURNS bigint
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET search_path = public
+SET search_path = ''
 AS $save$
 DECLARE
   uid uuid := auth.uid();
@@ -52,12 +58,12 @@ BEGIN
     RAISE EXCEPTION 'Not authenticated';
   END IF;
 
-  IF jsonb_typeof(p_program) IS DISTINCT FROM 'object' THEN
+  IF pg_catalog.jsonb_typeof(p_program) IS DISTINCT FROM 'object' THEN
     RAISE EXCEPTION 'invalid_import: program';
   END IF;
 
   FOR payload_key IN
-    SELECT jsonb_object_keys(p_program)
+    SELECT pg_catalog.jsonb_object_keys(p_program)
   LOOP
     IF payload_key NOT IN ('name', 'days') THEN
       RAISE EXCEPTION 'invalid_import: program_field';
@@ -77,57 +83,57 @@ BEGIN
     RAISE EXCEPTION 'active_program_required';
   END IF;
 
-  program_name := btrim(p_program->>'name');
+  program_name := pg_catalog.btrim(p_program->>'name');
   IF program_name IS NULL
-     OR char_length(program_name) < 1
-     OR char_length(program_name) > 80 THEN
+     OR pg_catalog.char_length(program_name) < 1
+     OR pg_catalog.char_length(program_name) > 80 THEN
     RAISE EXCEPTION 'invalid_import: program_name';
   END IF;
 
-  IF jsonb_typeof(p_program->'days') IS DISTINCT FROM 'array' THEN
+  IF pg_catalog.jsonb_typeof(p_program->'days') IS DISTINCT FROM 'array' THEN
     RAISE EXCEPTION 'invalid_import: days';
   END IF;
 
-  day_count := jsonb_array_length(p_program->'days');
+  day_count := pg_catalog.jsonb_array_length(p_program->'days');
   IF day_count < 1 OR day_count > 7 THEN
     RAISE EXCEPTION 'invalid_import: day_count';
   END IF;
 
   FOR day_item IN
-    SELECT value FROM jsonb_array_elements(p_program->'days')
+    SELECT value FROM pg_catalog.jsonb_array_elements(p_program->'days')
   LOOP
-    IF jsonb_typeof(day_item) IS DISTINCT FROM 'object' THEN
+    IF pg_catalog.jsonb_typeof(day_item) IS DISTINCT FROM 'object' THEN
       RAISE EXCEPTION 'invalid_import: day';
     END IF;
 
     FOR payload_key IN
-      SELECT jsonb_object_keys(day_item)
+      SELECT pg_catalog.jsonb_object_keys(day_item)
     LOOP
       IF payload_key NOT IN ('name', 'subtitle', 'exercises') THEN
         RAISE EXCEPTION 'invalid_import: day_field';
       END IF;
     END LOOP;
 
-    day_name := btrim(day_item->>'name');
-    IF day_name IS NULL OR char_length(day_name) < 1 OR char_length(day_name) > 60 THEN
+    day_name := pg_catalog.btrim(day_item->>'name');
+    IF day_name IS NULL OR pg_catalog.char_length(day_name) < 1 OR pg_catalog.char_length(day_name) > 60 THEN
       RAISE EXCEPTION 'invalid_import: day_name';
     END IF;
 
     day_subtitle := NULL;
-    IF day_item ? 'subtitle' AND jsonb_typeof(day_item->'subtitle') = 'string' THEN
-      day_subtitle := NULLIF(btrim(day_item->>'subtitle'), '');
-    ELSIF day_item ? 'subtitle' AND jsonb_typeof(day_item->'subtitle') IS DISTINCT FROM 'null' THEN
+    IF day_item ? 'subtitle' AND pg_catalog.jsonb_typeof(day_item->'subtitle') = 'string' THEN
+      day_subtitle := NULLIF(pg_catalog.btrim(day_item->>'subtitle'), '');
+    ELSIF day_item ? 'subtitle' AND pg_catalog.jsonb_typeof(day_item->'subtitle') IS DISTINCT FROM 'null' THEN
       RAISE EXCEPTION 'invalid_import: subtitle';
     END IF;
-    IF day_subtitle IS NOT NULL AND char_length(day_subtitle) > 2000 THEN
+    IF day_subtitle IS NOT NULL AND pg_catalog.char_length(day_subtitle) > 2000 THEN
       RAISE EXCEPTION 'invalid_import: subtitle';
     END IF;
 
-    IF jsonb_typeof(day_item->'exercises') IS DISTINCT FROM 'array' THEN
+    IF pg_catalog.jsonb_typeof(day_item->'exercises') IS DISTINCT FROM 'array' THEN
       RAISE EXCEPTION 'invalid_import: exercises';
     END IF;
 
-    exercise_count := jsonb_array_length(day_item->'exercises');
+    exercise_count := pg_catalog.jsonb_array_length(day_item->'exercises');
     -- An empty exercise list is a rest day, matching the TypeScript save plan.
     IF exercise_count > 12 THEN
       RAISE EXCEPTION 'invalid_import: exercises_per_day';
@@ -137,14 +143,14 @@ BEGIN
     seen_ids := ARRAY[]::bigint[];
     day_exercises := '[]'::jsonb;
     FOR exercise_item IN
-      SELECT value FROM jsonb_array_elements(day_item->'exercises')
+      SELECT value FROM pg_catalog.jsonb_array_elements(day_item->'exercises')
     LOOP
-      IF jsonb_typeof(exercise_item) IS DISTINCT FROM 'object' THEN
+      IF pg_catalog.jsonb_typeof(exercise_item) IS DISTINCT FROM 'object' THEN
         RAISE EXCEPTION 'invalid_import: exercise';
       END IF;
 
       FOR payload_key IN
-        SELECT jsonb_object_keys(exercise_item)
+        SELECT pg_catalog.jsonb_object_keys(exercise_item)
       LOOP
         IF payload_key NOT IN ('exercise_id', 'target_sets', 'min_reps', 'max_reps', 'notes') THEN
           RAISE EXCEPTION 'invalid_import: exercise_field';
@@ -158,34 +164,34 @@ BEGIN
 
       IF exercise_text IS NULL
          OR exercise_text !~ '^[1-9][0-9]*$'
-         OR char_length(exercise_text) > 19 THEN
+         OR pg_catalog.char_length(exercise_text) > 19 THEN
         RAISE EXCEPTION 'invalid_import: exercise_id';
       END IF;
-      IF char_length(exercise_text) = 19 AND exercise_text > '9223372036854775807' THEN
+      IF pg_catalog.char_length(exercise_text) = 19 AND exercise_text > '9223372036854775807' THEN
         RAISE EXCEPTION 'invalid_import: exercise_id';
       END IF;
       IF sets_text IS NULL OR sets_text !~ '^[0-9]+$' THEN
         RAISE EXCEPTION 'invalid_import: sets';
       END IF;
-      sets_text := ltrim(sets_text, '0');
+      sets_text := pg_catalog.ltrim(sets_text, '0');
       IF sets_text = '' THEN
         sets_text := '0';
       END IF;
-      IF char_length(sets_text) > 2 THEN
+      IF pg_catalog.char_length(sets_text) > 2 THEN
         RAISE EXCEPTION 'invalid_import: sets';
       END IF;
       IF min_text IS NULL OR min_text !~ '^[0-9]+$' OR max_text IS NULL OR max_text !~ '^[0-9]+$' THEN
         RAISE EXCEPTION 'invalid_import: reps';
       END IF;
-      min_text := ltrim(min_text, '0');
-      max_text := ltrim(max_text, '0');
+      min_text := pg_catalog.ltrim(min_text, '0');
+      max_text := pg_catalog.ltrim(max_text, '0');
       IF min_text = '' THEN
         min_text := '0';
       END IF;
       IF max_text = '' THEN
         max_text := '0';
       END IF;
-      IF char_length(min_text) > 3 OR char_length(max_text) > 3 THEN
+      IF pg_catalog.char_length(min_text) > 3 OR pg_catalog.char_length(max_text) > 3 THEN
         RAISE EXCEPTION 'invalid_import: reps';
       END IF;
 
@@ -215,28 +221,28 @@ BEGIN
       END IF;
 
       IF exercise_item ? 'notes'
-         AND jsonb_typeof(exercise_item->'notes') IS DISTINCT FROM 'string'
-         AND jsonb_typeof(exercise_item->'notes') IS DISTINCT FROM 'null' THEN
+         AND pg_catalog.jsonb_typeof(exercise_item->'notes') IS DISTINCT FROM 'string'
+         AND pg_catalog.jsonb_typeof(exercise_item->'notes') IS DISTINCT FROM 'null' THEN
         RAISE EXCEPTION 'invalid_import: notes';
       END IF;
-      notes := NULLIF(btrim(exercise_item->>'notes'), '');
-      IF notes IS NOT NULL AND char_length(notes) > 280 THEN
+      notes := NULLIF(pg_catalog.btrim(exercise_item->>'notes'), '');
+      IF notes IS NOT NULL AND pg_catalog.char_length(notes) > 280 THEN
         RAISE EXCEPTION 'invalid_import: notes';
       END IF;
 
-      seen_ids := array_append(seen_ids, exercise_id);
-      normalized_exercise := jsonb_build_object(
+      seen_ids := pg_catalog.array_append(seen_ids, exercise_id);
+      normalized_exercise := pg_catalog.jsonb_build_object(
         'exercise_id', exercise_id,
         'target_sets', target_sets,
         'min_reps', min_reps,
         'max_reps', max_reps,
         'notes', notes
       );
-      day_exercises := day_exercises || jsonb_build_array(normalized_exercise);
+      day_exercises := day_exercises || pg_catalog.jsonb_build_array(normalized_exercise);
     END LOOP;
 
-    normalized_days := normalized_days || jsonb_build_array(
-      jsonb_build_object(
+    normalized_days := normalized_days || pg_catalog.jsonb_build_array(
+      pg_catalog.jsonb_build_object(
         'name', day_name,
         'subtitle', day_subtitle,
         'exercises', day_exercises
@@ -254,7 +260,7 @@ BEGIN
 
   day_index := 0;
   FOR day_item IN
-    SELECT value FROM jsonb_array_elements(normalized_days)
+    SELECT value FROM pg_catalog.jsonb_array_elements(normalized_days)
   LOOP
     day_index := day_index + 1;
     day_name := day_item->>'name';
@@ -266,7 +272,7 @@ BEGIN
 
     exercise_index := 0;
     FOR exercise_item IN
-      SELECT value FROM jsonb_array_elements(day_item->'exercises')
+      SELECT value FROM pg_catalog.jsonb_array_elements(day_item->'exercises')
     LOOP
       exercise_index := exercise_index + 1;
       exercise_id := (exercise_item->>'exercise_id')::bigint;
