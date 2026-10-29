@@ -1,0 +1,8 @@
+[
+  { "id": 1, "name": "Barbell Bench Press", "equipment_type": "Barbell" },
+  { "id": 2, "name": "Dumbbell Bench Press", "equipment_type": "Dumbbell" },
+  { "id": 3, "name": "Machine Chest Press", "equipment_type": "Machine" },
+  { "id": 4, "name": "Assisted Pull-Up", "equipment_type": "Assisted" },
+  { "id": 5, "name": "Romanian Deadlift", "equipment_type": "Barbell" },
+  { "id": 6, "name": "Barbell Squat", "equipment_type": "Barbell" }
+]

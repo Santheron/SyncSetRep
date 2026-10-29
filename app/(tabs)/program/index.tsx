@@ -54,6 +54,23 @@ export default function ProgramScreen() {
             : `${programDays.length}-day split`}
       </Text>
 
+      <Link href="/program/build" asChild>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Build a routine"
+          style={({ pressed }) => [styles.linkButton, pressed && styles.dayPressed]}>
+          <Text style={styles.linkLabel}>Build a routine</Text>
+        </Pressable>
+      </Link>
+      <Link href="/program/saved" asChild>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Saved programs"
+          style={({ pressed }) => [styles.linkButton, pressed && styles.dayPressed]}>
+          <Text style={styles.linkLabel}>Saved programs</Text>
+        </Pressable>
+      </Link>
+
       {isLoading ? (
         <Text style={styles.status}>Loading program days...</Text>
       ) : errorMessage ? (
@@ -111,6 +128,21 @@ const styles = StyleSheet.create({
   },
   dayPressed: {
     opacity: 0.85,
+  },
+  linkButton: {
+    minHeight: 48,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.card,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  linkLabel: {
+    color: palette.text,
+    fontSize: 16,
+    fontWeight: '700',
   },
   dayCard: {
     minHeight: 80,

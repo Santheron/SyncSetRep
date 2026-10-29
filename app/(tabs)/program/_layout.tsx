@@ -21,6 +21,8 @@ export default function ProgramLayout() {
         contentStyle: { backgroundColor: palette.background },
       }}>
       <Stack.Screen name="index" options={{ title: 'Program' }} />
+      <Stack.Screen name="build" options={{ title: 'Build a routine' }} />
+      <Stack.Screen name="saved" options={{ title: 'Saved programs' }} />
       <Stack.Screen name="[id]" options={{ title: 'Workout Day' }} />
     </Stack>
   );
