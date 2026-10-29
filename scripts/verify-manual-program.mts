@@ -67,7 +67,7 @@ import {
   draftIdentity,
   reviewFromProgramDraft,
 } from '../lib/import/program-draft.ts';
-import { createManualProgramReview, type ProgramReview } from '../lib/import/review-editor.ts';
+import { createManualProgramReview, toImportPreview, type ProgramReview } from '../lib/import/review-editor.ts';
 import {
   IMPORT_CAPACITY_MESSAGE,
   IMPORT_SIGN_IN_MESSAGE,
@@ -199,6 +199,19 @@ try {
   assert.equal(review.days[2]?.exercises.length, 0);
   assert.equal(review.days[0]?.exercises[0]?.exerciseId, '4');
   assert.equal(review.days[0]?.exercises[1]?.exerciseId, '12');
+  const trackedReview = applyManualEdit(review, {
+    type: 'set-load-mode',
+    dayIndex: 0,
+    exerciseIndex: 0,
+    loadMode: 'assisted',
+  });
+  assert.equal(trackedReview.error, null);
+  assert.equal(trackedReview.review.days[0]?.exercises[0]?.loadMode, 'assisted');
+  assert.equal(trackedReview.review.days[0]?.exercises[1]?.loadMode ?? null, null);
+  assert.equal(validateManualRoutine(trackedReview.review).ok, true);
+  const trackedPreview = JSON.stringify(toImportPreview(trackedReview.review));
+  assert.equal(trackedPreview.includes('loadMode'), false);
+  assert.equal(trackedPreview.includes('load_mode'), false);
   assert.equal(review.days[0]?.exercises[1]?.sets.value, 3);
   assert.equal(review.days[0]?.exercises[1]?.sets.acceptance, 'user_entered');
   assert.equal(review.days[0]?.exercises[0]?.matchStatus, 'manual');

@@ -19,6 +19,7 @@ import { PlateLoadHint } from '@/components/plate-load';
 import { WarmupModal } from '@/components/warmup-modal';
 import { Colors } from '@/constants/theme';
 import { usePersistedWorkoutSets } from '@/hooks/use-persisted-workout-sets';
+import { formatTrackedLoad, TRACKING_MODE_LABELS } from '@/lib/load-mode';
 import { useRestTimer } from '@/hooks/use-rest-timer';
 import { duplicateExerciseSlotIds } from '@/lib/exercise-swap';
 import { buildWorkoutProgressions } from '@/lib/progression';
@@ -75,6 +76,8 @@ export default function ActiveWorkoutScreen() {
     setErrors,
     updateInput,
     completeSet,
+    tracking,
+    setExerciseTracking,
     flushAll,
     applySets,
     setBlockedSlotIds,
@@ -520,6 +523,51 @@ export default function ActiveWorkoutScreen() {
                   </Text>
                 ) : null}
                 {progression ? <ExerciseProgressionBlock progression={progression} /> : null}
+                {exerciseId ? (
+                  <View style={styles.trackingRow}>
+                    {([
+                      ['external', null],
+                      ['bodyweight', 'bodyweight'],
+                      ['added', 'added'],
+                      ['assisted', 'assisted'],
+                    ] as const).map(([key, mode]) => {
+                      const selected = (tracking[exerciseId]?.loadMode ?? null) === mode;
+                      return (
+                        <Pressable
+                          key={key}
+                          accessibilityRole="button"
+                          accessibilityLabel={`${TRACKING_MODE_LABELS[key]} tracking`}
+                          accessibilityState={{ selected }}
+                          onPress={() => setExerciseTracking(exerciseId, mode, tracking[exerciseId]?.weightUnit ?? 'lb')}
+                          style={[styles.trackingChip, selected && styles.trackingChipSelected]}>
+                          <Text style={[styles.trackingChipLabel, selected && styles.trackingChipLabelSelected]}>
+                            {TRACKING_MODE_LABELS[key]}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                    {(tracking[exerciseId]?.loadMode === 'added' ||
+                      tracking[exerciseId]?.loadMode === 'assisted') &&
+                    (['lb', 'kg'] as const).map((unit) => {
+                      const selected = (tracking[exerciseId]?.weightUnit ?? 'lb') === unit;
+                      return (
+                        <Pressable
+                          key={unit}
+                          accessibilityRole="button"
+                          accessibilityLabel={`${unit} units`}
+                          accessibilityState={{ selected }}
+                          onPress={() =>
+                            setExerciseTracking(exerciseId, tracking[exerciseId]?.loadMode ?? null, unit)
+                          }
+                          style={[styles.trackingChip, selected && styles.trackingChipSelected]}>
+                          <Text style={[styles.trackingChipLabel, selected && styles.trackingChipLabelSelected]}>
+                            {unit}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                ) : null}
 
                 {exerciseId
                   ? Array.from({ length: setCount }, (_, index) => {
@@ -538,7 +586,13 @@ export default function ActiveWorkoutScreen() {
                               editable={!inputsDisabled}
                               keyboardType="decimal-pad"
                               onChangeText={(value) => updateInput(key, 'weight', value)}
-                              placeholder="Weight"
+                              placeholder={
+                                (tracking[exerciseId]?.loadMode ?? null) === 'assisted'
+                                  ? 'Assistance'
+                                  : (tracking[exerciseId]?.loadMode ?? null) === 'bodyweight'
+                                    ? '0'
+                                    : 'Weight'
+                              }
                               placeholderTextColor={palette.muted}
                               style={[
                                 styles.setInput,
@@ -597,6 +651,20 @@ export default function ActiveWorkoutScreen() {
                               </Text>
                             </Pressable>
                           </View>
+                          <Text style={styles.exerciseMeta}>
+                            {formatTrackedLoad({
+                              loadMode: tracking[exerciseId]?.loadMode ?? null,
+                              weight:
+                                (tracking[exerciseId]?.loadMode ?? null) === 'assisted'
+                                  ? null
+                                  : Number(values.weight) || 0,
+                              assistance:
+                                (tracking[exerciseId]?.loadMode ?? null) === 'assisted'
+                                  ? Number(values.weight) || 0
+                                  : null,
+                              weightUnit: tracking[exerciseId]?.weightUnit ?? 'lb',
+                            })}
+                          </Text>
                           <PlateLoadHint
                             equipmentType={item.exercise?.equipmentType}
                             exerciseName={item.exercise?.name}
@@ -756,6 +824,32 @@ const styles = StyleSheet.create({
   exerciseMeta: {
     color: palette.muted,
     fontSize: 16,
+  },
+  trackingRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  trackingChip: {
+    minHeight: 36,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: palette.border,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trackingChipSelected: {
+    backgroundColor: palette.accent,
+    borderColor: palette.accent,
+  },
+  trackingChipLabel: {
+    color: palette.text,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  trackingChipLabelSelected: {
+    color: palette.accentText,
   },
   setBlock: {
     gap: 8,

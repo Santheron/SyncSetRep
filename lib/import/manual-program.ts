@@ -24,6 +24,7 @@ import {
   nameUnsavedExercise,
   renameProgram,
   setDaySubtitle,
+  setExerciseLoadMode,
   setExerciseNotes,
   setUserNumber,
   toImportPreview,
@@ -37,6 +38,7 @@ import {
 } from './save-imported-program.ts';
 import { IMPORT_CAPACITY_MESSAGE } from './save-plan.ts';
 import { toSavePayload, type SaveImportedProgramPayload } from './save-payload.ts';
+import { isLoadMode, type LoadMode } from '../load-mode.ts';
 import {
   normalizeExerciseName,
   type PlannedExercise,
@@ -121,6 +123,9 @@ export const MANUAL_CAPACITY_SAVE_MESSAGE =
 
 export const MANUAL_EMPTY_DAYS_MESSAGE = 'Add at least one day before saving. Nothing was saved.';
 
+export const MANUAL_LOAD_MODE_MESSAGE =
+  'Choose bodyweight, added weight, assisted, or external tracking for every exercise. Nothing was saved.';
+
 export const MANUAL_SIGN_IN_LIST_MESSAGE = 'Sign in to see your saved routines.';
 
 export const MANUAL_SIGN_IN_SWITCH_MESSAGE =
@@ -201,7 +206,8 @@ export type ManualEdit =
   | { type: 'move-exercise'; dayIndex: number; exerciseIndex: number; direction: 'up' | 'down' }
   | { type: 'choose-exercise'; dayIndex: number; exerciseIndex: number; exerciseId: string }
   | { type: 'preview-exercise'; dayIndex: number; exerciseIndex: number; name: string }
-  | { type: 'set-notes'; dayIndex: number; exerciseIndex: number; notes: string };
+  | { type: 'set-notes'; dayIndex: number; exerciseIndex: number; notes: string }
+  | { type: 'set-load-mode'; dayIndex: number; exerciseIndex: number; loadMode: LoadMode | null };
 
 export type ManualEditResult = {
   review: ProgramReview;
@@ -443,6 +449,12 @@ export function applyManualEdit(review: ProgramReview, edit: ManualEdit): Manual
       error: null,
     };
   }
+  if (edit.type === 'set-load-mode') {
+    return {
+      review: setExerciseLoadMode(review, edit.dayIndex, edit.exerciseIndex, edit.loadMode),
+      error: null,
+    };
+  }
   if (edit.type === 'preview-exercise') {
     return {
       review: nameUnsavedExercise(
@@ -643,6 +655,9 @@ export function validateManualRoutine(
       const notes = typeof exercise.notes === 'string' ? exercise.notes.trim() : '';
       if (notes.length > NOTE_EDIT_MAX) {
         pushMessage(errors, MANUAL_NOTE_SAVE_MESSAGE);
+      }
+      if (exercise.loadMode != null && !isLoadMode(exercise.loadMode)) {
+        pushMessage(errors, MANUAL_LOAD_MODE_MESSAGE);
       }
     }
   }

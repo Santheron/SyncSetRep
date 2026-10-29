@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { AppState } from 'react-native';
 
 import { DUPLICATE_SLOT_MESSAGE, parseSetKey, setKey } from '@/lib/exercise-swap';
+import type { LoadMode, WeightUnit } from '@/lib/load-mode';
 import {
   formatSetInput,
   parseOptionalReps,
@@ -64,6 +65,7 @@ export function usePersistedWorkoutSets(
   const pendingKeysRef = useRef(new Set<string>());
   const completingRef = useRef(new Set<string>());
   const blockedSlotIdsRef = useRef(new Set<string>());
+  const trackingRef = useRef<Record<string, { loadMode: LoadMode | null; weightUnit: WeightUnit }>>({});
   const readyRef = useRef(isReady);
   const readOnlyRef = useRef(isReadOnly);
 
@@ -133,11 +135,15 @@ export function usePersistedWorkoutSets(
         return;
       }
 
+      const chosen = trackingRef.current[exerciseId] ?? { loadMode: null, weightUnit: 'lb' as const };
       const result = await saveWorkoutSet(targetSessionId, {
         setId: idsRef.current[key],
         exerciseId,
         setNumber,
-        weight: weight.value,
+        weight: chosen.loadMode === 'assisted' ? null : weight.value,
+        assistance: chosen.loadMode === 'assisted' ? weight.value : null,
+        loadMode: chosen.loadMode,
+        weightUnit: chosen.loadMode == null ? null : chosen.weightUnit,
         reps: reps.value,
         rir: rir.value,
         isCompleted: completedRef.current.has(key),
@@ -288,11 +294,15 @@ export function usePersistedWorkoutSets(
       const next = previous
         .catch(() => undefined)
         .then(async () => {
+          const chosen = trackingRef.current[exerciseId] ?? { loadMode: null, weightUnit: 'lb' as const };
           const result = await saveWorkoutSet(sessionId, {
             setId: idsRef.current[key],
             exerciseId,
             setNumber,
-            weight: weight.value,
+            weight: chosen.loadMode === 'assisted' ? null : weight.value,
+            assistance: chosen.loadMode === 'assisted' ? weight.value : null,
+            loadMode: chosen.loadMode,
+            weightUnit: chosen.loadMode == null ? null : chosen.weightUnit,
             reps: reps.value,
             rir: rir.value,
             isCompleted: true,
@@ -323,6 +333,17 @@ export function usePersistedWorkoutSets(
     },
     [sessionId, setFieldError],
   );
+
+  const [tracking, setTracking] = useState(trackingRef.current);
+
+  const setExerciseTracking = useCallback((exerciseId: string, loadMode: LoadMode | null, weightUnit: WeightUnit = 'lb') => {
+    const next = {
+      ...trackingRef.current,
+      [exerciseId]: { loadMode, weightUnit },
+    };
+    trackingRef.current = next;
+    setTracking(next);
+  }, []);
 
   const flushAll = useCallback(async () => {
     if (!sessionId || !readyRef.current) {
@@ -372,6 +393,8 @@ export function usePersistedWorkoutSets(
     setErrors,
     updateInput,
     completeSet,
+    tracking,
+    setExerciseTracking,
     flushAll,
     applySets,
     setBlockedSlotIds,

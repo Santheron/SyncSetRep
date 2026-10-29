@@ -1,3 +1,4 @@
+import { formatLegacyLoad, formatTrackedLoad, type LoadMode, type WeightUnit } from '@/lib/load-mode';
 import { formatWeight } from '@/lib/warmup';
 import { formatWorkoutDate } from '@/lib/workout-format';
 
@@ -22,6 +23,9 @@ export type ProgressionSet = {
   reps: number | null;
   rir?: number | null;
   isCompleted: boolean;
+  loadMode?: LoadMode | null;
+  assistance?: number | null;
+  weightUnit?: WeightUnit | null;
 };
 
 export type ExerciseProgression = {
@@ -42,6 +46,9 @@ type WorkingSet = {
   weight: number | null;
   reps: number;
   rir: number | null;
+  loadMode?: LoadMode | null;
+  assistance?: number | null;
+  weightUnit?: WeightUnit | null;
 };
 
 const UPPER_INCREASE_LB = 5;
@@ -125,6 +132,9 @@ export function workingSetsFromRecords(
       weight: toFiniteNumber(record.weight),
       reps,
       rir: toFiniteNumber(record.rir),
+      loadMode: record.loadMode ?? null,
+      assistance: record.assistance ?? null,
+      weightUnit: record.weightUnit ?? null,
     });
   }
 
@@ -323,10 +333,12 @@ function formatPreviousSetLine(set: WorkingSet, isBodyweight: boolean): string {
   const weight = toFiniteNumber(set.weight);
   let line: string;
 
-  if (isBodyweight) {
+  if (set.loadMode != null) {
+    line = `${formatTrackedLoad(set)} × ${set.reps}`;
+  } else if (isBodyweight) {
     line =
       weight !== null && weight > 0
-        ? `+${formatWeight(weight)} lb × ${set.reps}`
+        ? `${formatLegacyLoad(weight)} × ${set.reps}`
         : `BW × ${set.reps}`;
   } else if (weight !== null && weight > 0) {
     line = `${formatWeight(weight)} lb × ${set.reps}`;

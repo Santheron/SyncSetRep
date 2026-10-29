@@ -56,6 +56,7 @@ import {
   PLANNED_EXERCISES,
   normalizeExerciseName,
 } from '@/lib/import/planned-exercises';
+import { TRACKING_MODE_LABELS } from '@/lib/load-mode';
 import type { ProgramReview } from '@/lib/import/review-editor';
 
 const palette = Colors.dark;
@@ -289,6 +290,40 @@ export function ManualProgramBuilder({
                       {exerciseChoiceText(exercise.exerciseId, choices, exercise.sourceName)}
                     </Text>
                   </Pressable>
+                  <View style={styles.filterWrap}>
+                    {([
+                      ['external', null],
+                      ['bodyweight', 'bodyweight'],
+                      ['added', 'added'],
+                      ['assisted', 'assisted'],
+                    ] as const).map(([key, mode]) => (
+                      <Pressable
+                        key={key}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${TRACKING_MODE_LABELS[key]} tracking`}
+                        accessibilityState={{ selected: (exercise.loadMode ?? null) === mode }}
+                        onPress={() =>
+                          edit({
+                            type: 'set-load-mode',
+                            dayIndex,
+                            exerciseIndex,
+                            loadMode: mode,
+                          })
+                        }
+                        style={[
+                          styles.filterChip,
+                          (exercise.loadMode ?? null) === mode && styles.filterChipSelected,
+                        ]}>
+                        <Text
+                          style={[
+                            styles.filterChipLabel,
+                            (exercise.loadMode ?? null) === mode && styles.filterChipLabelSelected,
+                          ]}>
+                          {TRACKING_MODE_LABELS[key]}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
                   <View style={styles.row}>
                     <TextInput
                       accessibilityLabel={setsLabel(dayNumber, exerciseNumber)}

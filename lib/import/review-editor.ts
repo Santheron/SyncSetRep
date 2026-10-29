@@ -1,3 +1,4 @@
+import type { LoadMode } from '../load-mode.ts';
 import { MAX_DAYS, MAX_EXERCISES, MAX_EXERCISES_PER_DAY, REPS_MAX, REPS_MIN, SETS_MAX, SETS_MIN } from './limits.ts';
 import type { ImportPreview, ImportPreviewIssue, PreviewMatchStatus, PreviewNumber } from './save-plan.ts';
 
@@ -17,6 +18,7 @@ export type ReviewExercise = {
   repsMax: PreviewNumber;
   restSeconds: PreviewNumber;
   notes: string | null;
+  loadMode?: LoadMode | null;
 };
 
 export type ReviewDay = {
@@ -49,6 +51,7 @@ function copyExercise(exercise: ReviewExercise): ReviewExercise {
     repsMax: { ...exercise.repsMax },
     restSeconds: { ...exercise.restSeconds },
     notes: exercise.notes,
+    loadMode: exercise.loadMode ?? null,
   };
 }
 
@@ -93,6 +96,7 @@ export function blankManualExercise(): ReviewExercise {
     repsMax: missingNumber(),
     restSeconds: missingNumber(),
     notes: null,
+    loadMode: null,
   };
 }
 
@@ -330,6 +334,24 @@ export function acceptSuggestion(
   const next = copyExercise(exercise);
   next[field] = { acceptance: 'accepted_suggestion', value: suggestion, suggestion };
   const exercises = day.exercises.map(copyExercise);
+  exercises[exerciseIndex] = next;
+  return replaceDay(review, dayIndex, { ...copyDay(day), exercises });
+}
+
+export function setExerciseLoadMode(
+  review: ProgramReview,
+  dayIndex: number,
+  exerciseIndex: number,
+  loadMode: LoadMode | null,
+): ProgramReview {
+  const day = review.days[dayIndex];
+  const exercise = day?.exercises[exerciseIndex];
+  if (!day || !exercise) {
+    return review;
+  }
+  const exercises = day.exercises.map(copyExercise);
+  const next = copyExercise(exercise);
+  next.loadMode = loadMode;
   exercises[exerciseIndex] = next;
   return replaceDay(review, dayIndex, { ...copyDay(day), exercises });
 }

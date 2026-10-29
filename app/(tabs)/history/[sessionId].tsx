@@ -6,8 +6,8 @@ import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
 import { getAuthenticatedUserId } from '@/lib/current-user';
 import { supabase } from '@/lib/supabase';
+import { formatHistorySetLine } from '@/lib/load-mode';
 import {
-  formatSetLoad,
   formatWorkoutDate,
   formatWorkoutDuration,
   unwrapRelation,
@@ -283,9 +283,10 @@ export default function HistoryDetailScreen() {
                 <View key={set.id} style={styles.setBlock}>
                   <Text style={styles.setHeading}>Set {set.setNumber}</Text>
                   <Text style={styles.setLine}>
-                    {set.weight !== null && Number(set.weight) > 0
-                      ? `${formatSetLoad(set.weight)} × ${set.reps ?? 0}`
-                      : `${set.reps ?? 0} reps`}
+                    {formatHistorySetLine({
+                      weight: set.weight,
+                      reps: set.reps,
+                    })}
                   </Text>
                   {set.rir !== null ? <Text style={styles.setRir}>RIR {set.rir}</Text> : null}
                 </View>

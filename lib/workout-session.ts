@@ -1,4 +1,5 @@
 import { getAuthenticatedUserId } from '@/lib/current-user';
+import { PERSIST_LOAD_MODE, prepareTrackedWrite, type LoadMode, type WeightUnit } from '@/lib/load-mode';
 import {
   assignLoggedSets,
   DUPLICATE_SLOT_MESSAGE,
@@ -105,6 +106,9 @@ export type WorkoutSetDraft = {
   reps: number | null;
   rir: number | null;
   isCompleted: boolean;
+  loadMode?: LoadMode | null;
+  assistance?: number | null;
+  weightUnit?: WeightUnit | null;
 };
 
 type Result<T> =
@@ -1812,11 +1816,22 @@ export async function saveWorkoutSet(
   sessionId: string,
   draft: WorkoutSetDraft,
 ): Promise<Result<{ id: string }>> {
-  const values = {
+  const tracked = prepareTrackedWrite({
+    loadMode: draft.loadMode ?? null,
     weight: draft.weight,
+    assistance: draft.assistance ?? null,
+    weightUnit: draft.weightUnit ?? null,
+    persistLoadMode: PERSIST_LOAD_MODE,
+  });
+  if (!tracked.ok) {
+    return { ok: false, error: tracked.error };
+  }
+  const values = {
+    weight: tracked.weight,
     reps: draft.reps,
     rir: draft.rir,
     is_completed: draft.isCompleted,
+    ...tracked.extra,
   };
   const logBase = {
     workout_session_id: sessionId,
