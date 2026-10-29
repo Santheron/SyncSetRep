@@ -10,6 +10,7 @@ import {
   IMPORT_DAY_NAME_MESSAGE,
   IMPORT_DUPLICATE_EXERCISE_MESSAGE,
   IMPORT_EMPTY_DAYS_MESSAGE,
+  IMPORT_INVERTED_REPS_MESSAGE,
   IMPORT_ISSUE_MESSAGE,
   IMPORT_NO_ACTIVE_PROGRAM_MESSAGE,
   IMPORT_NOTE_MESSAGE,
@@ -112,6 +113,8 @@ assert.equal(plan.days[0]?.program_exercises[0]?.max_reps, 12);
 assert.equal(plan.days[0]?.program_exercises[0]?.notes, 'Pause');
 assert.equal(plan.days[1]?.program_exercises[0]?.exercise_id, '6');
 assert.equal(plan.days[1]?.program_exercises[0]?.target_sets, 4);
+assert.equal(plan.days[1]?.program_exercises[0]?.min_reps, 5);
+assert.equal(plan.days[1]?.program_exercises[0]?.max_reps, 5);
 assert.equal('rest_seconds' in (plan.days[0]?.program_exercises[0] ?? {}), false);
 assert.equal('rest_seconds' in (plan.days[1]?.program_exercises[0] ?? {}), false);
 assert.equal('weight' in (plan.days[0]?.program_exercises[0] ?? {}), false);
@@ -225,6 +228,29 @@ for (const reps of [0, 101]) {
     IMPORT_UNACCEPTED_REPS_MESSAGE,
   ]);
 }
+
+const inverted = preview();
+const invertedExercise = inverted.days[0]?.exercises[0];
+if (!invertedExercise) {
+  throw new Error('preview exercise missing');
+}
+invertedExercise.repsMin = { acceptance: 'extracted', value: 12, suggestion: null };
+invertedExercise.repsMax = { acceptance: 'accepted_suggestion', value: 8, suggestion: 8 };
+assert.deepEqual(errorsOf(buildImportInsertPlan(inverted, USER_ID, { hasActiveProgram: true })), [
+  IMPORT_INVERTED_REPS_MESSAGE,
+]);
+
+const suggestedInverted = preview();
+const suggestedExercise = suggestedInverted.days[0]?.exercises[0];
+if (!suggestedExercise) {
+  throw new Error('preview exercise missing');
+}
+suggestedExercise.repsMin = { acceptance: 'missing', value: 12, suggestion: 12 };
+suggestedExercise.repsMax = { acceptance: 'missing', value: 8, suggestion: 8 };
+assert.deepEqual(
+  errorsOf(buildImportInsertPlan(suggestedInverted, USER_ID, { hasActiveProgram: true })),
+  [IMPORT_UNACCEPTED_REPS_MESSAGE],
+);
 
 for (const persistRestSeconds of [false, true]) {
   const rest = preview();

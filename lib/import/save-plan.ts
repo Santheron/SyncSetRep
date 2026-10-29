@@ -111,6 +111,9 @@ export const IMPORT_UNACCEPTED_SETS_MESSAGE =
 export const IMPORT_UNACCEPTED_REPS_MESSAGE =
   'Enter rep min and max from 1 through 100 for every exercise before saving. Nothing was saved.';
 
+export const IMPORT_INVERTED_REPS_MESSAGE =
+  'Enter a rep minimum that is less than or equal to the rep maximum. Nothing was saved.';
+
 export const IMPORT_REST_RANGE_MESSAGE =
   'Rest must be from 0 through 600 seconds. Nothing was saved.';
 
@@ -278,11 +281,14 @@ export function buildImportInsertPlan(
       const sets = acceptedInt(exercise.sets, SETS_MIN, SETS_MAX);
       const repsMin = acceptedInt(exercise.repsMin, REPS_MIN, REPS_MAX);
       const repsMax = acceptedInt(exercise.repsMax, REPS_MIN, REPS_MAX);
+      const repsInverted = repsMin != null && repsMax != null && repsMin > repsMax;
       if (sets == null) {
         push(errors, IMPORT_UNACCEPTED_SETS_MESSAGE);
       }
       if (repsMin == null || repsMax == null) {
         push(errors, IMPORT_UNACCEPTED_REPS_MESSAGE);
+      } else if (repsInverted) {
+        push(errors, IMPORT_INVERTED_REPS_MESSAGE);
       }
 
       const notes = emptyToNull(exercise.notes);
@@ -291,7 +297,14 @@ export function buildImportInsertPlan(
       }
 
       const rest = readRest(exercise.restSeconds, persistRest, errors);
-      if (!confirmed || id == null || sets == null || repsMin == null || repsMax == null) {
+      if (
+        !confirmed ||
+        id == null ||
+        sets == null ||
+        repsMin == null ||
+        repsMax == null ||
+        repsInverted
+      ) {
         return;
       }
       if (notes != null && notes.length > NOTE_EDIT_MAX) {
