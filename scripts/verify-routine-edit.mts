@@ -33,7 +33,68 @@ const permissionPaths = [
   'sql/routine-write-permission-precheck.sql',
   'sql/routine-write-enablement.sql',
   'sql/routine-write-enablement-rollback.sql',
+  'sql/routine-write-step-precheck.sql',
+  'sql/routine-write-baseline.sql',
 ];
+const stepMasks: Record<string, string> = {
+  'sql/load-mode.sql':
+    'routine_write_step_closed:record_tracked_set=closed:create_custom_exercise=absent:update_owned_program=absent:save_manual_program=absent',
+  'sql/program-day-archive.sql':
+    'routine_write_step_closed:record_tracked_set=closed:create_custom_exercise=absent:update_owned_program=absent:save_manual_program=absent',
+  'sql/exercise-ownership.sql':
+    'routine_write_step_closed:record_tracked_set=closed:create_custom_exercise=closed:update_owned_program=absent:save_manual_program=absent',
+  'sql/routine-edit.sql':
+    'routine_write_step_closed:record_tracked_set=closed:create_custom_exercise=closed:update_owned_program=closed:save_manual_program=closed',
+};
+const schemaAfter: Record<string, string> = {
+  'sql/load-mode.sql': '3:1:1:0:0:c:0:1:0',
+  'sql/program-day-archive.sql': '3:1:1:1:0:c:0:1:0',
+  'sql/exercise-ownership.sql': '3:1:1:1:1:a:3:0:0',
+  'sql/routine-edit.sql': '3:1:1:1:1:a:3:0:6',
+};
+const schemaStateSql = `
+  SELECT
+    (SELECT count(*)::text FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'workout_sets'
+        AND column_name IN ('load_mode', 'assistance', 'weight_unit'))
+    || ':' ||
+    (SELECT count(*)::text FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'program_exercises'
+        AND column_name = 'load_mode')
+    || ':' ||
+    (SELECT count(*)::text FROM pg_catalog.pg_proc
+      WHERE pronamespace = 'public'::regnamespace AND proname = 'record_tracked_set')
+    || ':' ||
+    (SELECT count(*)::text FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'program_days'
+        AND column_name = 'archived_at')
+    || ':' ||
+    (SELECT count(*)::text FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'exercises'
+        AND column_name = 'owner_user_id')
+    || ':' ||
+    (SELECT confdeltype::text FROM pg_catalog.pg_constraint
+      WHERE conname = 'program_exercises_exercise_id_fkey')
+    || ':' ||
+    (SELECT count(*)::text FROM pg_catalog.pg_proc
+      WHERE pronamespace = 'public'::regnamespace
+        AND proname IN ('normalize_exercise_name', 'seed_standard_exercises', 'create_custom_exercise'))
+    || ':' ||
+    (SELECT count(*)::text FROM pg_catalog.pg_policy
+      WHERE polrelid = 'public.exercises'::regclass
+        AND polname = 'exercises_select_authenticated')
+    || ':' ||
+    (SELECT count(*)::text FROM pg_catalog.pg_proc
+      WHERE pronamespace = 'public'::regnamespace
+        AND proname IN (
+          'routine_require_int',
+          'routine_normalize_days',
+          'resolve_routine_exercise',
+          'routine_write_days',
+          'update_owned_program',
+          'save_manual_program'
+        ));
+`;
 const writePrivilegeSql = `
   SELECT has_function_privilege('authenticated', 'public.update_owned_program(jsonb)', 'EXECUTE')::text
     || ':' || has_function_privilege('anon', 'public.update_owned_program(jsonb)', 'EXECUTE')::text
@@ -107,6 +168,23 @@ COMMIT;
 `;
 }
 
+function abortBeforeCommit(sql: string) {
+  const begins = sql.match(/^\s*BEGIN\s*;\s*$/gim) ?? [];
+  const commits = sql.match(/^\s*COMMIT\s*;\s*$/gim) ?? [];
+  assert.equal(begins.length, 1, 'expected one BEGIN');
+  assert.equal(commits.length, 1, 'expected one COMMIT');
+  const aborted = sql.replace(/\r?\n[ \t]*COMMIT\s*;\s*$/i, `
+DO $atomic$
+BEGIN
+  RAISE EXCEPTION 'atomic_file_failed';
+END
+$atomic$;
+`);
+  assert.equal(/^\s*COMMIT\s*;\s*$/im.test(aborted), false);
+  assert.match(aborted, /atomic_file_failed/);
+  return aborted;
+}
+
 async function assertPermissionDenied(
   runSql: (sql: string) => Promise<{ code: number; stdout: string; stderr: string }>,
   sql: string,
@@ -168,6 +246,7 @@ async function main() {
   for (const path of sqlPaths) {
     const text = await readFile(join(root, path), 'utf8');
     assert.equal(/\bGRANT\s+EXECUTE\b/i.test(text), false, path);
+    abortBeforeCommit(text);
   }
   for (const path of ['sql/load-mode.sql', 'sql/exercise-ownership.sql', 'sql/routine-edit.sql']) {
     const text = await readFile(join(root, path), 'utf8');
@@ -180,6 +259,58 @@ async function main() {
   assert.match(precheckText, /routine_write_signature_missing/);
   assert.match(precheckText, /service_role/);
   assert.equal(/^\s*(GRANT|REVOKE)\b/im.test(precheckText), false);
+  const stepPrecheckText = await readFile(join(root, permissionPaths[3]), 'utf8');
+  assert.match(stepPrecheckText, /default_transaction_read_only = on/);
+  assert.match(stepPrecheckText, /routine_write_step_closed/);
+  assert.match(stepPrecheckText, /routine_write_permission_open/);
+  assert.match(stepPrecheckText, /routine_write_overload/);
+  assert.equal(/^\s*(GRANT|REVOKE)\b/im.test(stepPrecheckText), false);
+  const baselineText = await readFile(join(root, permissionPaths[4]), 'utf8');
+  assert.match(baselineText, /default_transaction_read_only = on/);
+  assert.match(baselineText, /routine_write_baseline_ready/);
+  assert.match(baselineText, /routine_write_function_present/);
+  assert.match(baselineText, /routine_write_overload/);
+  assert.match(baselineText, /routine_write_baseline_differs/);
+  assert.equal(/^\s*(GRANT|REVOKE)\b/im.test(baselineText), false);
+  assert.equal(
+    /SELECT\s+public\.(record_tracked_set|create_custom_exercise|update_owned_program|save_manual_program)\s*\(/i.test(baselineText),
+    false,
+  );
+  async function expectBaselineReady(
+    runSql: (sql: string) => Promise<{ code: number; stdout: string; stderr: string }>,
+    label: string,
+  ) {
+    const baseline = await runSql(baselineText);
+    assert.equal(baseline.code, 0, `${label}\n${baseline.stderr}`);
+    assert.equal(baseline.stdout.trim(), 'routine_write_baseline_ready', label);
+  }
+  async function expectBaselineRejects(
+    runSql: (sql: string) => Promise<{ code: number; stdout: string; stderr: string }>,
+    token: RegExp,
+    label: string,
+  ) {
+    const baseline = await runSql(baselineText);
+    assert.notEqual(baseline.code, 0, label);
+    assert.match(baseline.stderr, token, `${label}\n${baseline.stderr}`);
+    assert.equal(baseline.stdout.includes('routine_write_baseline_ready'), false, baseline.stdout);
+  }
+  async function expectStep(
+    runSql: (sql: string) => Promise<{ code: number; stdout: string; stderr: string }>,
+    path: string,
+  ) {
+    const step = await runSql(stepPrecheckText);
+    assert.equal(step.code, 0, `${path}\n${step.stderr}`);
+    assert.equal(step.stdout.trim(), stepMasks[path], path);
+  }
+  async function expectFullPrecheckIncomplete(
+    runSql: (sql: string) => Promise<{ code: number; stdout: string; stderr: string }>,
+    label: string,
+  ) {
+    const full = await runSql(precheckText);
+    assert.notEqual(full.code, 0, label);
+    assert.match(full.stderr, /routine_write_signature_missing/, `${label}\n${full.stderr}`);
+    assert.equal(full.stdout.includes('routine_write_permissions_closed'), false, full.stdout);
+  }
   const enablementText = await readFile(join(root, permissionPaths[1]), 'utf8');
   assert.match(enablementText, /GRANT EXECUTE ON FUNCTION public\.record_tracked_set/);
   assert.match(enablementText, /GRANT EXECUTE ON FUNCTION public\.create_custom_exercise\(text\) TO authenticated/);
@@ -197,6 +328,17 @@ async function main() {
   assert.match(deploymentText, /archive_order_rollback_blocked/);
   assert.match(deploymentText, /Out of scope/);
   assert.match(deploymentText, /service_role/);
+  assert.match(deploymentText, /Failure-recovery matrix/);
+  assert.match(deploymentText, /routine_write_baseline_ready/);
+  assert.match(deploymentText, /has_function_privilege/);
+  assert.match(deploymentText, /Do not execute the functions/);
+  assert.equal(
+    /SELECT\s+public\.(record_tracked_set|create_custom_exercise|update_owned_program|save_manual_program)\s*\(/i.test(deploymentText),
+    false,
+  );
+  for (const mask of new Set(Object.values(stepMasks))) {
+    assert.match(deploymentText, new RegExp(mask.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
   const ownershipRollbackText = await readFile(join(root, 'sql/exercise-ownership-rollback.sql'), 'utf8');
   assert.match(ownershipRollbackText, /exercise_owner_rollback_blocked/);
   assert.match(ownershipRollbackText, /owner_user_id was not dropped/);
@@ -415,6 +557,7 @@ async function main() {
       'revoke_public_only:false:true',
       'overload_public:true:original_public:false:original_authenticated:true',
     ]);
+    await expectBaselineReady(psql, 'main baseline');
     const defaultPrivileges = await psql(`
       ALTER DEFAULT PRIVILEGES IN SCHEMA public
         GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role;
@@ -424,6 +567,13 @@ async function main() {
     for (const path of sqlPaths) {
       const applied = await psql(await readFile(join(root, path), 'utf8'));
       assert.equal(applied.code, 0, `${path}\n${applied.stderr}`);
+      await expectStep(psql, path);
+      if (path === 'sql/load-mode.sql') {
+        await expectBaselineRejects(psql, /routine_write_function_present/, 'baseline after load-mode');
+      }
+      if (path !== 'sql/routine-edit.sql') {
+        await expectFullPrecheckIncomplete(psql, path);
+      }
     }
     assert.equal(await exerciseGrantList(), grantsBefore);
     const fkAfter = await psql(`
@@ -1388,14 +1538,123 @@ async function main() {
       VALUES (1, 1, 1, 135, 5, 2, true);
     `);
     assert.equal(safeRows.code, 0, safeRows.stderr);
+    await expectBaselineReady(safe, 'safe baseline');
+    const presentProbe = await safe(`
+      CREATE FUNCTION public.record_tracked_set(integer)
+      RETURNS void
+      LANGUAGE sql
+      AS 'SELECT NULL';
+    `);
+    assert.equal(presentProbe.code, 0, presentProbe.stderr);
+    await expectBaselineRejects(safe, /routine_write_function_present/, 'existing signature');
+    const dropPresent = await safe(`DROP FUNCTION public.record_tracked_set(integer);`);
+    assert.equal(dropPresent.code, 0, dropPresent.stderr);
+    const overloadProbe = await safe(`
+      CREATE FUNCTION public.save_manual_program(jsonb)
+      RETURNS void
+      LANGUAGE sql
+      AS 'SELECT NULL';
+      CREATE FUNCTION public.save_manual_program(jsonb, boolean)
+      RETURNS void
+      LANGUAGE sql
+      AS 'SELECT NULL';
+    `);
+    assert.equal(overloadProbe.code, 0, overloadProbe.stderr);
+    await expectBaselineRejects(safe, /routine_write_overload/, 'unexpected overload');
+    const dropOverloadProbe = await safe(`
+      DROP FUNCTION public.save_manual_program(jsonb, boolean);
+      DROP FUNCTION public.save_manual_program(jsonb);
+    `);
+    assert.equal(dropOverloadProbe.code, 0, dropOverloadProbe.stderr);
+    const policyProbe = await safe(`
+      CREATE POLICY exercises_select_visible ON public.exercises
+        FOR SELECT TO authenticated
+        USING (true);
+    `);
+    assert.equal(policyProbe.code, 0, policyProbe.stderr);
+    await expectBaselineRejects(safe, /routine_write_baseline_differs/, 'extra exercise policy');
+    const dropPolicyProbe = await safe(`DROP POLICY exercises_select_visible ON public.exercises;`);
+    assert.equal(dropPolicyProbe.code, 0, dropPolicyProbe.stderr);
+    const triggerProbe = await safe(`
+      CREATE FUNCTION public.routine_write_baseline_probe()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $probe$ BEGIN RETURN NEW; END $probe$;
+      CREATE TRIGGER routine_write_baseline_probe
+        BEFORE UPDATE ON public.exercises
+        FOR EACH ROW EXECUTE FUNCTION public.routine_write_baseline_probe();
+    `);
+    assert.equal(triggerProbe.code, 0, triggerProbe.stderr);
+    await expectBaselineRejects(safe, /routine_write_baseline_differs/, 'exercise trigger');
+    const dropTriggerProbe = await safe(`
+      DROP TRIGGER routine_write_baseline_probe ON public.exercises;
+      DROP FUNCTION public.routine_write_baseline_probe();
+    `);
+    assert.equal(dropTriggerProbe.code, 0, dropTriggerProbe.stderr);
+    const grantProbe = await safe(`REVOKE SELECT ON TABLE public.exercises FROM authenticated;`);
+    assert.equal(grantProbe.code, 0, grantProbe.stderr);
+    await expectBaselineRejects(safe, /routine_write_baseline_differs/, 'missing exercise grant');
+    const restoreGrant = await safe(`GRANT SELECT ON TABLE public.exercises TO authenticated;`);
+    assert.equal(restoreGrant.code, 0, restoreGrant.stderr);
+    await expectBaselineReady(safe, 'safe baseline restored');
     const safeDefaults = await safe(`
       ALTER DEFAULT PRIVILEGES IN SCHEMA public
         GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role;
     `);
     assert.equal(safeDefaults.code, 0, safeDefaults.stderr);
+    const safeState = async () => {
+      const result = await safe(schemaStateSql);
+      assert.equal(result.code, 0, result.stderr);
+      return result.stdout.trim();
+    };
+    let previousState = await safeState();
+    assert.equal(previousState, '0:0:0:0:0:c:0:1:0');
     for (const path of sqlPaths) {
-      const applied = await safe(await readFile(join(root, path), 'utf8'));
+      const text = await readFile(join(root, path), 'utf8');
+      const aborted = await safe(abortBeforeCommit(text));
+      assert.notEqual(aborted.code, 0, path);
+      assert.match(aborted.stderr, /atomic_file_failed/, `${path}\n${aborted.stderr}`);
+      assert.equal(await safeState(), previousState, path);
+      const safeWeightDuring = await safe(`
+        SELECT weight::text || ':' || reps::text
+        FROM public.workout_sets
+        WHERE id = 1;
+      `);
+      assert.equal(safeWeightDuring.stdout.trim(), '135:5');
+      const applied = await safe(text);
       assert.equal(applied.code, 0, `${path}\n${applied.stderr}`);
+      previousState = schemaAfter[path];
+      assert.equal(await safeState(), previousState, path);
+      await expectStep(safe, path);
+      if (path === 'sql/load-mode.sql') {
+        await expectBaselineRejects(safe, /routine_write_function_present/, 'safe baseline after load-mode');
+      }
+      if (path === 'sql/load-mode.sql') {
+        const opened = await safe(`
+          GRANT EXECUTE ON FUNCTION public.record_tracked_set(
+            bigint, bigint, integer, text, numeric, numeric, text, integer, integer, boolean
+          ) TO authenticated;
+        `);
+        assert.equal(opened.code, 0, opened.stderr);
+        const stepOpen = await safe(stepPrecheckText);
+        assert.notEqual(stepOpen.code, 0);
+        assert.match(stepOpen.stderr, /routine_write_permission_open/);
+        assert.equal(stepOpen.stdout.includes('routine_write_step_closed'), false);
+        const closedGrant = await safe(`
+          REVOKE ALL ON FUNCTION public.record_tracked_set(
+            bigint, bigint, integer, text, numeric, numeric, text, integer, integer, boolean
+          ) FROM authenticated;
+        `);
+        assert.equal(closedGrant.code, 0, closedGrant.stderr);
+        await expectStep(safe, path);
+      }
+      if (path === 'sql/routine-edit.sql') {
+        const full = await safe(precheckText);
+        assert.equal(full.code, 0, full.stderr);
+        assert.match(full.stdout, /routine_write_permissions_closed/);
+      } else {
+        await expectFullPrecheckIncomplete(safe, path);
+      }
     }
     const safeEmpty = await safe(`
       SELECT
@@ -1409,6 +1668,69 @@ async function main() {
     const safeClosed = await safe(precheckText);
     assert.equal(safeClosed.code, 0, safeClosed.stderr);
     assert.match(safeClosed.stdout, /routine_write_permissions_closed/);
+    const droppedSave = await safe(`DROP FUNCTION public.save_manual_program(jsonb);`);
+    assert.equal(droppedSave.code, 0, droppedSave.stderr);
+    await expectFullPrecheckIncomplete(safe, 'missing save_manual_program');
+    const stepAfterDrop = await safe(stepPrecheckText);
+    assert.equal(stepAfterDrop.code, 0, stepAfterDrop.stderr);
+    assert.equal(
+      stepAfterDrop.stdout.trim(),
+      'routine_write_step_closed:record_tracked_set=closed:create_custom_exercise=closed:update_owned_program=closed:save_manual_program=absent',
+    );
+    const restoredEdit = await safe(await readFile(join(root, 'sql/routine-edit.sql'), 'utf8'));
+    assert.equal(restoredEdit.code, 0, restoredEdit.stderr);
+    await expectStep(safe, 'sql/routine-edit.sql');
+    const overload = await safe(`
+      CREATE FUNCTION public.save_manual_program(jsonb, boolean)
+      RETURNS void
+      LANGUAGE sql
+      AS 'SELECT NULL';
+    `);
+    assert.equal(overload.code, 0, overload.stderr);
+    for (const sql of [precheckText, stepPrecheckText]) {
+      const rejected = await safe(sql);
+      assert.notEqual(rejected.code, 0);
+      assert.match(rejected.stderr, /routine_write_overload/);
+      assert.equal(rejected.stdout.includes('routine_write_permissions_closed'), false);
+      assert.equal(rejected.stdout.includes('routine_write_step_closed'), false);
+    }
+    const dropOverload = await safe(`DROP FUNCTION public.save_manual_program(jsonb, boolean);`);
+    assert.equal(dropOverload.code, 0, dropOverload.stderr);
+    const unexpectedGrants = [
+      [
+        `GRANT EXECUTE ON FUNCTION public.create_custom_exercise(text) TO anon;`,
+        `REVOKE ALL ON FUNCTION public.create_custom_exercise(text) FROM anon;`,
+      ],
+      [
+        `GRANT EXECUTE ON FUNCTION public.save_manual_program(jsonb) TO authenticated;`,
+        `REVOKE ALL ON FUNCTION public.save_manual_program(jsonb) FROM authenticated;`,
+      ],
+      [
+        `GRANT EXECUTE ON FUNCTION public.record_tracked_set(bigint,bigint,integer,text,numeric,numeric,text,integer,integer,boolean) TO service_role;`,
+        `REVOKE ALL ON FUNCTION public.record_tracked_set(bigint,bigint,integer,text,numeric,numeric,text,integer,integer,boolean) FROM service_role;`,
+      ],
+      [
+        `GRANT EXECUTE ON FUNCTION public.update_owned_program(jsonb) TO PUBLIC;`,
+        `REVOKE ALL ON FUNCTION public.update_owned_program(jsonb) FROM PUBLIC;`,
+      ],
+    ];
+    for (const [grant, revoke] of unexpectedGrants) {
+      const granted = await safe(grant);
+      assert.equal(granted.code, 0, `${grant}\n${granted.stderr}`);
+      for (const sql of [precheckText, stepPrecheckText]) {
+        const rejected = await safe(sql);
+        assert.notEqual(rejected.code, 0, grant);
+        assert.match(rejected.stderr, /routine_write_permission_open/, `${grant}\n${rejected.stderr}`);
+        assert.equal(rejected.stdout.includes('routine_write_permissions_closed'), false);
+        assert.equal(rejected.stdout.includes('routine_write_step_closed'), false);
+      }
+      const revoked = await safe(revoke);
+      assert.equal(revoked.code, 0, `${revoke}\n${revoked.stderr}`);
+    }
+    const restoredPrecheck = await safe(precheckText);
+    assert.equal(restoredPrecheck.code, 0, restoredPrecheck.stderr);
+    assert.match(restoredPrecheck.stdout, /routine_write_permissions_closed/);
+    await expectStep(safe, 'sql/routine-edit.sql');
     const safeBlockedCall = `SELECT public.record_tracked_set(1, 1, 1, 'added', 10, NULL, 'lb', 5, 2, true);`;
     await assertPermissionDenied(safe, asUser(userA, safeBlockedCall), 'safe authenticated record_tracked_set');
     await assertPermissionDenied(safe, asRole('anon', safeBlockedCall), 'safe anon record_tracked_set');

@@ -340,6 +340,8 @@ const sqlFiles = [
   'sql/routine-edit.sql',
   'sql/routine-edit-rollback.sql',
   'sql/routine-write-permission-precheck.sql',
+  'sql/routine-write-step-precheck.sql',
+  'sql/routine-write-baseline.sql',
   'sql/routine-write-enablement.sql',
   'sql/routine-write-enablement-rollback.sql',
 ];
@@ -352,6 +354,14 @@ for (const path of ['sql/load-mode.sql', 'sql/exercise-ownership.sql', 'sql/rout
   assert.equal(/\bGRANT\s+EXECUTE\b/i.test(source(path)), false, path);
 }
 assert.match(source('sql/routine-write-permission-precheck.sql'), /routine_write_permissions_closed/);
+assert.match(source('sql/routine-write-step-precheck.sql'), /routine_write_step_closed/);
+assert.match(source('sql/routine-write-baseline.sql'), /routine_write_baseline_ready/);
+assert.match(source('sql/routine-write-deployment.md'), /Failure-recovery matrix/);
+assert.match(source('sql/routine-write-deployment.md'), /Do not execute the functions/);
+assert.equal(
+  /SELECT\s+public\.record_tracked_set\s*\(/i.test(source('sql/routine-write-deployment.md')),
+  false,
+);
 assert.match(source('sql/routine-write-enablement.sql'), /routine_write_permissions_enabled/);
 assert.equal(
   /\bDROP\s+(FUNCTION|TABLE|COLUMN|POLICY)\b/i.test(source('sql/routine-write-enablement-rollback.sql')),
