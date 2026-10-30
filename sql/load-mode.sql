@@ -8,6 +8,12 @@
 -- record_tracked_set writes only an unfinished session owned by auth.uid().
 -- A finished session raises history_locked and is left unchanged.
 -- The phone must not call record_tracked_set while PERSIST_LOAD_MODE is false.
+-- PostgreSQL grants EXECUTE to PUBLIC on a new function. Default privileges
+-- can also grant anon, authenticated, or service_role. A direct grant is
+-- separate from PUBLIC, and another signature keeps its own grant.
+-- CREATE OR REPLACE keeps an existing grant. This file revokes PUBLIC, anon,
+-- authenticated, and service_role after creating the function and does not
+-- give EXECUTE back. sql/routine-write-enablement.sql is the later grant.
 -- Rollback: sql/load-mode-rollback.sql. It refuses while any load_mode,
 -- assistance, or weight_unit value is stored. When every value is NULL,
 -- dropping the columns leaves workout_sets.weight unchanged.
@@ -196,10 +202,6 @@ $tracked$;
 
 REVOKE ALL ON FUNCTION public.record_tracked_set(
   bigint, bigint, integer, text, numeric, numeric, text, integer, integer, boolean
-) FROM PUBLIC, anon, authenticated;
-
-GRANT EXECUTE ON FUNCTION public.record_tracked_set(
-  bigint, bigint, integer, text, numeric, numeric, text, integer, integer, boolean
-) TO authenticated;
+) FROM PUBLIC, anon, authenticated, service_role;
 
 COMMIT;

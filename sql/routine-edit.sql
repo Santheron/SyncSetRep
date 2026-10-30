@@ -19,6 +19,14 @@
 -- inactive program.
 -- The phone must not call these functions while the save and edit flags
 -- stay false.
+-- PostgreSQL grants EXECUTE to PUBLIC on a new function. Default privileges
+-- can also grant anon, authenticated, or service_role. A direct grant is
+-- separate from PUBLIC, and another signature keeps its own grant.
+-- CREATE OR REPLACE keeps an existing grant. This file revokes PUBLIC, anon,
+-- authenticated, and service_role from every routine function and does not
+-- give EXECUTE back. sql/routine-write-enablement.sql later grants only
+-- update_owned_program and save_manual_program, and only when that rollout
+-- is approved.
 -- Rollback: sql/routine-edit-rollback.sql. Roll this file back before
 -- sql/exercise-ownership-rollback.sql.
 
@@ -669,14 +677,11 @@ BEGIN
 END;
 $save$;
 
-REVOKE ALL ON FUNCTION public.routine_require_int(text, integer, integer, text) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.routine_normalize_days(jsonb, boolean) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.resolve_routine_exercise(uuid, jsonb) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.routine_write_days(uuid, bigint, jsonb, boolean) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.update_owned_program(jsonb) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.save_manual_program(jsonb) FROM PUBLIC, anon, authenticated;
-
-GRANT EXECUTE ON FUNCTION public.update_owned_program(jsonb) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.save_manual_program(jsonb) TO authenticated;
+REVOKE ALL ON FUNCTION public.routine_require_int(text, integer, integer, text) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.routine_normalize_days(jsonb, boolean) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.resolve_routine_exercise(uuid, jsonb) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.routine_write_days(uuid, bigint, jsonb, boolean) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.update_owned_program(jsonb) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.save_manual_program(jsonb) FROM PUBLIC, anon, authenticated, service_role;
 
 COMMIT;

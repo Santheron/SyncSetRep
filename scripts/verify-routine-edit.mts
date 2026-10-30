@@ -29,6 +29,25 @@ const rollbackPaths = [
   'sql/program-day-archive-rollback.sql',
   'sql/load-mode-rollback.sql',
 ];
+const permissionPaths = [
+  'sql/routine-write-permission-precheck.sql',
+  'sql/routine-write-enablement.sql',
+  'sql/routine-write-enablement-rollback.sql',
+];
+const writePrivilegeSql = `
+  SELECT has_function_privilege('authenticated', 'public.update_owned_program(jsonb)', 'EXECUTE')::text
+    || ':' || has_function_privilege('anon', 'public.update_owned_program(jsonb)', 'EXECUTE')::text
+    || ':' || has_function_privilege('public', 'public.update_owned_program(jsonb)', 'EXECUTE')::text
+    || ':' || has_function_privilege('service_role', 'public.update_owned_program(jsonb)', 'EXECUTE')::text
+    || ':' || has_function_privilege('authenticated', 'public.seed_standard_exercises(jsonb)', 'EXECUTE')::text
+    || ':' || has_function_privilege('authenticated', 'public.resolve_routine_exercise(uuid,jsonb)', 'EXECUTE')::text
+    || ':' || has_function_privilege('authenticated', 'public.create_custom_exercise(text)', 'EXECUTE')::text
+    || ':' || has_function_privilege('authenticated', 'public.save_manual_program(jsonb)', 'EXECUTE')::text
+    || ':' || has_function_privilege('authenticated', 'public.record_tracked_set(bigint,bigint,integer,text,numeric,numeric,text,integer,integer,boolean)', 'EXECUTE')::text
+    || ':' || has_function_privilege('anon', 'public.record_tracked_set(bigint,bigint,integer,text,numeric,numeric,text,integer,integer,boolean)', 'EXECUTE')::text
+    || ':' || has_function_privilege('service_role', 'public.record_tracked_set(bigint,bigint,integer,text,numeric,numeric,text,integer,integer,boolean)', 'EXECUTE')::text;
+`;
+const writePrivilegesEnabled = 'true:false:false:false:false:false:true:true:true:false:false';
 
 function run(file: string, args: string[], input?: string) {
   return new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
@@ -79,6 +98,25 @@ COMMIT;
 `;
 }
 
+function asRole(role: string, statement: string) {
+  return `
+BEGIN;
+SET LOCAL ROLE ${role};
+${statement}
+COMMIT;
+`;
+}
+
+async function assertPermissionDenied(
+  runSql: (sql: string) => Promise<{ code: number; stdout: string; stderr: string }>,
+  sql: string,
+  label: string,
+) {
+  const result = await runSql(sql);
+  assert.notEqual(result.code, 0, label);
+  assert.match(result.stderr, /permission denied for function/i, `${label}\n${result.stderr}`);
+}
+
 function payload(json: unknown) {
   return `$payload$${JSON.stringify(json)}$payload$::jsonb`;
 }
@@ -122,11 +160,43 @@ const sessionsSql = `
 `;
 
 async function main() {
-  for (const path of [...sqlPaths, ...rollbackPaths]) {
+  for (const path of [...sqlPaths, ...rollbackPaths, ...permissionPaths]) {
     const text = await readFile(join(root, path), 'utf8');
     assert.equal(text.startsWith('-- NOT APPLIED.'), true, path);
     assert.equal(/supabase\.co|postgres:\/\/|password\s*=/i.test(text), false, path);
   }
+  for (const path of sqlPaths) {
+    const text = await readFile(join(root, path), 'utf8');
+    assert.equal(/\bGRANT\s+EXECUTE\b/i.test(text), false, path);
+  }
+  for (const path of ['sql/load-mode.sql', 'sql/exercise-ownership.sql', 'sql/routine-edit.sql']) {
+    const text = await readFile(join(root, path), 'utf8');
+    assert.match(text, /FROM PUBLIC, anon, authenticated, service_role/);
+  }
+  const precheckText = await readFile(join(root, permissionPaths[0]), 'utf8');
+  assert.match(precheckText, /default_transaction_read_only = on/);
+  assert.match(precheckText, /routine_write_permission_open/);
+  assert.match(precheckText, /routine_write_overload/);
+  assert.match(precheckText, /routine_write_signature_missing/);
+  assert.match(precheckText, /service_role/);
+  assert.equal(/^\s*(GRANT|REVOKE)\b/im.test(precheckText), false);
+  const enablementText = await readFile(join(root, permissionPaths[1]), 'utf8');
+  assert.match(enablementText, /GRANT EXECUTE ON FUNCTION public\.record_tracked_set/);
+  assert.match(enablementText, /GRANT EXECUTE ON FUNCTION public\.create_custom_exercise\(text\) TO authenticated/);
+  assert.match(enablementText, /GRANT EXECUTE ON FUNCTION public\.update_owned_program\(jsonb\) TO authenticated/);
+  assert.match(enablementText, /GRANT EXECUTE ON FUNCTION public\.save_manual_program\(jsonb\) TO authenticated/);
+  assert.equal(/GRANT\s+EXECUTE[\s\S]*\bTO\s+(anon|PUBLIC|service_role)\b/i.test(enablementText), false);
+  const enablementRollbackText = await readFile(join(root, permissionPaths[2]), 'utf8');
+  assert.equal(/\bGRANT\s+EXECUTE\b/i.test(enablementRollbackText), false);
+  assert.equal(/\bDROP\s+(FUNCTION|TABLE|COLUMN|POLICY)\b/i.test(enablementRollbackText), false);
+  assert.match(enablementRollbackText, /FROM PUBLIC, anon, authenticated, service_role/);
+  const deploymentText = await readFile(join(root, 'sql/routine-write-deployment.md'), 'utf8');
+  assert.match(deploymentText, /routine_write_permissions_closed/);
+  assert.match(deploymentText, /load_mode_rollback_blocked/);
+  assert.match(deploymentText, /exercise_owner_rollback_blocked/);
+  assert.match(deploymentText, /archive_order_rollback_blocked/);
+  assert.match(deploymentText, /Out of scope/);
+  assert.match(deploymentText, /service_role/);
   const ownershipRollbackText = await readFile(join(root, 'sql/exercise-ownership-rollback.sql'), 'utf8');
   assert.match(ownershipRollbackText, /exercise_owner_rollback_blocked/);
   assert.match(ownershipRollbackText, /owner_user_id was not dropped/);
@@ -310,6 +380,47 @@ async function main() {
     assert.match(finishedSnapshot, /135/);
     assert.match(finishedSnapshot, /-4/);
 
+    const aclProbe = await psql(`
+      CREATE FUNCTION public.routine_write_acl_probe()
+      RETURNS void
+      LANGUAGE sql
+      AS 'SELECT NULL';
+      SELECT 'new_public:' || has_function_privilege('public', 'public.routine_write_acl_probe()', 'EXECUTE')::text
+        || ':new_authenticated:' || has_function_privilege('authenticated', 'public.routine_write_acl_probe()', 'EXECUTE')::text;
+      REVOKE ALL ON FUNCTION public.routine_write_acl_probe() FROM PUBLIC;
+      GRANT EXECUTE ON FUNCTION public.routine_write_acl_probe() TO authenticated;
+      CREATE OR REPLACE FUNCTION public.routine_write_acl_probe()
+      RETURNS void
+      LANGUAGE sql
+      AS 'SELECT NULL';
+      SELECT 'replaced_public:' || has_function_privilege('public', 'public.routine_write_acl_probe()', 'EXECUTE')::text
+        || ':replaced_authenticated:' || has_function_privilege('authenticated', 'public.routine_write_acl_probe()', 'EXECUTE')::text;
+      REVOKE ALL ON FUNCTION public.routine_write_acl_probe() FROM PUBLIC;
+      SELECT 'revoke_public_only:' || has_function_privilege('public', 'public.routine_write_acl_probe()', 'EXECUTE')::text
+        || ':' || has_function_privilege('authenticated', 'public.routine_write_acl_probe()', 'EXECUTE')::text;
+      CREATE FUNCTION public.routine_write_acl_probe(integer)
+      RETURNS void
+      LANGUAGE sql
+      AS 'SELECT NULL';
+      SELECT 'overload_public:' || has_function_privilege('public', 'public.routine_write_acl_probe(integer)', 'EXECUTE')::text
+        || ':original_public:' || has_function_privilege('public', 'public.routine_write_acl_probe()', 'EXECUTE')::text
+        || ':original_authenticated:' || has_function_privilege('authenticated', 'public.routine_write_acl_probe()', 'EXECUTE')::text;
+      DROP FUNCTION public.routine_write_acl_probe();
+      DROP FUNCTION public.routine_write_acl_probe(integer);
+    `);
+    assert.equal(aclProbe.code, 0, aclProbe.stderr);
+    assert.deepEqual(aclProbe.stdout.trim().split(/\r?\n/), [
+      'new_public:true:new_authenticated:true',
+      'replaced_public:false:replaced_authenticated:true',
+      'revoke_public_only:false:true',
+      'overload_public:true:original_public:false:original_authenticated:true',
+    ]);
+    const defaultPrivileges = await psql(`
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role;
+    `);
+    assert.equal(defaultPrivileges.code, 0, defaultPrivileges.stderr);
+
     for (const path of sqlPaths) {
       const applied = await psql(await readFile(join(root, path), 'utf8'));
       assert.equal(applied.code, 0, `${path}\n${applied.stderr}`);
@@ -352,6 +463,47 @@ async function main() {
     `);
     assert.notEqual(mixedMode.code, 0);
     assert.match(mixedMode.stderr, /workout_sets_tracked_load_check/);
+
+    const closed = await psql(precheckText);
+    assert.equal(closed.code, 0, closed.stderr);
+    assert.match(closed.stdout, /routine_write_permissions_closed/);
+    const blockedCall = `SELECT public.record_tracked_set(2, 1, 1, 'added', 10, NULL, 'lb', 8, 2, true);`;
+    await assertPermissionDenied(psql, asUser(userA, blockedCall), 'authenticated record_tracked_set');
+    await assertPermissionDenied(psql, asRole('anon', blockedCall), 'anon record_tracked_set');
+    await assertPermissionDenied(psql, asRole('service_role', blockedCall), 'service_role record_tracked_set');
+    await assertPermissionDenied(
+      psql,
+      asUser(userA, `SELECT public.create_custom_exercise('Should Not Run');`),
+      'authenticated create_custom_exercise',
+    );
+    await assertPermissionDenied(
+      psql,
+      asUser(userA, `SELECT public.update_owned_program('{}'::jsonb);`),
+      'authenticated update_owned_program',
+    );
+    await assertPermissionDenied(
+      psql,
+      asUser(userA, `SELECT public.save_manual_program('{}'::jsonb);`),
+      'authenticated save_manual_program',
+    );
+    const unchangedSet = await psql(`
+      SELECT weight::text
+      FROM public.workout_sets
+      WHERE workout_session_id = 2 AND set_number = 1;
+    `);
+    assert.equal(unchangedSet.stdout.trim(), '100');
+    const customNotInserted = await psql(`
+      SELECT count(*) FROM public.exercises WHERE name = 'Should Not Run';
+    `);
+    assert.equal(customNotInserted.stdout.trim(), '0');
+    const enabled = await psql(enablementText);
+    assert.equal(enabled.code, 0, enabled.stderr);
+    assert.match(enabled.stdout, /routine_write_permissions_enabled/);
+    const openAfterEnablement = await psql(precheckText);
+    assert.notEqual(openAfterEnablement.code, 0);
+    assert.match(openAfterEnablement.stderr, /routine_write_permission_open/);
+    const enabledPrivileges = await psql(writePrivilegeSql);
+    assert.equal(enabledPrivileges.stdout.trim(), writePrivilegesEnabled);
 
     const trackedCall = (userId: string, args: string) => psql(asUser(
       userId,
@@ -1004,15 +1156,8 @@ async function main() {
     const writeDef = await psql(`SELECT pg_get_functiondef('public.routine_write_days(uuid,bigint,jsonb,boolean)'::regprocedure);`);
     assert.match(writeDef.stdout, /workout_sessions/);
     assert.equal(/workout_sets|is_active/i.test(writeDef.stdout), false);
-    const grants = await psql(`
-      SELECT has_function_privilege('authenticated', 'public.update_owned_program(jsonb)', 'EXECUTE')::text
-        || ':' || has_function_privilege('anon', 'public.update_owned_program(jsonb)', 'EXECUTE')::text
-        || ':' || has_function_privilege('authenticated', 'public.seed_standard_exercises(jsonb)', 'EXECUTE')::text
-        || ':' || has_function_privilege('authenticated', 'public.resolve_routine_exercise(uuid,jsonb)', 'EXECUTE')::text
-        || ':' || has_function_privilege('authenticated', 'public.create_custom_exercise(text)', 'EXECUTE')::text
-        || ':' || has_function_privilege('authenticated', 'public.save_manual_program(jsonb)', 'EXECUTE')::text;
-    `);
-    assert.equal(grants.stdout.trim(), 'true:false:false:false:true:true');
+    const grants = await psql(writePrivilegeSql);
+    assert.equal(grants.stdout.trim(), writePrivilegesEnabled);
 
     const bandId = band.stdout.trim();
     const routinesBeforeDelete = await psql(`
@@ -1118,6 +1263,19 @@ async function main() {
         AND proname = 'record_tracked_set';
     `);
     assert.equal(trackedFunctionRemains.stdout.trim(), '1');
+    const trackedGrantRemains = await psql(`
+      SELECT has_function_privilege(
+        'authenticated',
+        'public.record_tracked_set(bigint,bigint,integer,text,numeric,numeric,text,integer,integer,boolean)',
+        'EXECUTE'
+      )::text
+        || ':' || has_function_privilege(
+          'service_role',
+          'public.record_tracked_set(bigint,bigint,integer,text,numeric,numeric,text,integer,integer,boolean)',
+          'EXECUTE'
+        )::text;
+    `);
+    assert.equal(trackedGrantRemains.stdout.trim(), 'true:false');
 
     const routineFunctionsGone = await psql(`
       SELECT count(*)
@@ -1230,6 +1388,11 @@ async function main() {
       VALUES (1, 1, 1, 135, 5, 2, true);
     `);
     assert.equal(safeRows.code, 0, safeRows.stderr);
+    const safeDefaults = await safe(`
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role;
+    `);
+    assert.equal(safeDefaults.code, 0, safeDefaults.stderr);
     for (const path of sqlPaths) {
       const applied = await safe(await readFile(join(root, path), 'utf8'));
       assert.equal(applied.code, 0, `${path}\n${applied.stderr}`);
@@ -1243,6 +1406,38 @@ async function main() {
         (SELECT count(*) FROM public.program_exercises WHERE load_mode IS NOT NULL)::text;
     `);
     assert.equal(safeEmpty.stdout.trim(), '0:0:0:0');
+    const safeClosed = await safe(precheckText);
+    assert.equal(safeClosed.code, 0, safeClosed.stderr);
+    assert.match(safeClosed.stdout, /routine_write_permissions_closed/);
+    const safeBlockedCall = `SELECT public.record_tracked_set(1, 1, 1, 'added', 10, NULL, 'lb', 5, 2, true);`;
+    await assertPermissionDenied(safe, asUser(userA, safeBlockedCall), 'safe authenticated record_tracked_set');
+    await assertPermissionDenied(safe, asRole('anon', safeBlockedCall), 'safe anon record_tracked_set');
+    await assertPermissionDenied(safe, asRole('service_role', safeBlockedCall), 'safe service_role record_tracked_set');
+    const safeWeight = await safe(`
+      SELECT weight::text || ':' || reps::text
+      FROM public.workout_sets
+      WHERE id = 1;
+    `);
+    assert.equal(safeWeight.stdout.trim(), '135:5');
+    const safeEnabled = await safe(enablementText);
+    assert.equal(safeEnabled.code, 0, safeEnabled.stderr);
+    assert.match(safeEnabled.stdout, /routine_write_permissions_enabled/);
+    const safeOpen = await safe(precheckText);
+    assert.notEqual(safeOpen.code, 0);
+    assert.match(safeOpen.stderr, /routine_write_permission_open/);
+    const safeRevoked = await safe(enablementRollbackText);
+    assert.equal(safeRevoked.code, 0, safeRevoked.stderr);
+    assert.match(safeRevoked.stdout, /routine_write_permissions_closed/);
+    const safeClosedAgain = await safe(precheckText);
+    assert.equal(safeClosedAgain.code, 0, safeClosedAgain.stderr);
+    assert.match(safeClosedAgain.stdout, /routine_write_permissions_closed/);
+    const safeFunctionBeforeRollback = await safe(`
+      SELECT count(*)
+      FROM pg_proc
+      WHERE pronamespace = 'public'::regnamespace
+        AND proname = 'record_tracked_set';
+    `);
+    assert.equal(safeFunctionBeforeRollback.stdout.trim(), '1');
     for (const path of rollbackPaths) {
       const applied = await safe(await readFile(join(root, path), 'utf8'));
       assert.equal(applied.code, 0, `${path}\n${applied.stderr}`);

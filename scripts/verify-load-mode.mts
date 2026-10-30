@@ -339,12 +339,24 @@ const sqlFiles = [
   'sql/exercise-ownership-rollback.sql',
   'sql/routine-edit.sql',
   'sql/routine-edit-rollback.sql',
+  'sql/routine-write-permission-precheck.sql',
+  'sql/routine-write-enablement.sql',
+  'sql/routine-write-enablement-rollback.sql',
 ];
 for (const path of sqlFiles) {
   const text = source(path);
   assert.equal(text.startsWith('-- NOT APPLIED.'), true, path);
   assert.equal(/supabase\.co|postgres:\/\/|password\s*=/i.test(text), false, path);
 }
+for (const path of ['sql/load-mode.sql', 'sql/exercise-ownership.sql', 'sql/routine-edit.sql']) {
+  assert.equal(/\bGRANT\s+EXECUTE\b/i.test(source(path)), false, path);
+}
+assert.match(source('sql/routine-write-permission-precheck.sql'), /routine_write_permissions_closed/);
+assert.match(source('sql/routine-write-enablement.sql'), /routine_write_permissions_enabled/);
+assert.equal(
+  /\bDROP\s+(FUNCTION|TABLE|COLUMN|POLICY)\b/i.test(source('sql/routine-write-enablement-rollback.sql')),
+  false,
+);
 const routineSql = source('sql/routine-edit.sql');
 assert.equal(/UPDATE\s+public\.workout_/i.test(routineSql), false);
 assert.equal(/DELETE\s+FROM\s+public\.workout_/i.test(routineSql), false);

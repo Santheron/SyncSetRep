@@ -18,7 +18,12 @@
 -- seed_standard_exercises writes category, exercise type, and equipment
 -- from the payload. It does not leave new rows on the machine default.
 -- It inserts only when the normalized name is absent, and never updates.
--- create_custom_exercise is not granted while the phone flag stays false.
+-- PostgreSQL grants EXECUTE to PUBLIC on a new function. Default privileges
+-- can also grant anon, authenticated, or service_role. A direct grant is
+-- separate from PUBLIC, and another signature keeps its own grant.
+-- CREATE OR REPLACE keeps an existing grant. This file revokes PUBLIC, anon,
+-- authenticated, and service_role and does not give EXECUTE back.
+-- sql/routine-write-enablement.sql is the later grant.
 -- Rollback: sql/exercise-ownership-rollback.sql.
 -- When every owner_user_id is NULL, that rollback restores the production
 -- select policy and ON DELETE CASCADE. It does not change table grants or
@@ -88,7 +93,7 @@ AS $norm$
   );
 $norm$;
 
-REVOKE ALL ON FUNCTION public.normalize_exercise_name(text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.normalize_exercise_name(text) FROM PUBLIC, anon, authenticated, service_role;
 
 DROP POLICY exercises_select_authenticated ON public.exercises;
 
@@ -210,7 +215,7 @@ BEGIN
 END;
 $seed$;
 
-REVOKE ALL ON FUNCTION public.seed_standard_exercises(jsonb) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.seed_standard_exercises(jsonb) FROM PUBLIC, anon, authenticated, service_role;
 
 CREATE OR REPLACE FUNCTION public.create_custom_exercise(p_name text)
 RETURNS bigint
@@ -295,7 +300,6 @@ BEGIN
 END;
 $custom$;
 
-REVOKE ALL ON FUNCTION public.create_custom_exercise(text) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.create_custom_exercise(text) TO authenticated;
+REVOKE ALL ON FUNCTION public.create_custom_exercise(text) FROM PUBLIC, anon, authenticated, service_role;
 
 COMMIT;
