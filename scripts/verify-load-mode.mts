@@ -22,6 +22,7 @@ import {
   formatHistorySetLine,
   formatLegacyLoad,
   formatTrackedLoad,
+  isActiveProgramDay,
   prepareTrackedWrite,
   trackingModeLabel,
   visibleProgramDays,
@@ -68,6 +69,23 @@ assert.equal(
 );
 assert.equal(formatTrackedLoad({ loadMode: null, weight: 25 }).includes('Assisted'), false);
 assert.equal(formatTrackedLoad({ loadMode: null, weight: 25 }).includes('BW +'), false);
+assert.equal(formatTrackedLoad({ loadMode: 'added', weight: '', weightUnit: 'lb' }), 'BW +');
+assert.equal(formatTrackedLoad({ loadMode: 'added', weight: '0', weightUnit: 'kg' }), 'BW +');
+assert.equal(formatTrackedLoad({ loadMode: 'added', weight: null, weightUnit: 'lb' }), 'BW +');
+assert.equal(
+  formatTrackedLoad({ loadMode: 'assisted', assistance: '', weight: null, weightUnit: 'lb' }),
+  'Assisted',
+);
+assert.equal(
+  formatTrackedLoad({ loadMode: 'assisted', assistance: 0, weight: null, weightUnit: 'kg' }),
+  'Assisted',
+);
+assert.equal(
+  formatTrackedLoad({ loadMode: 'assisted', assistance: null, weight: null }),
+  'Assisted',
+);
+assert.equal(formatTrackedLoad({ loadMode: 'bodyweight', weight: '' }), 'BW');
+assert.equal(formatTrackedLoad({ loadMode: null, weight: 0 }), 'BW');
 
 assert.equal(formatHistorySetLine({ weight: 135, reps: 5 }), `135 lb ${times} 5`);
 assert.equal(formatHistorySetLine({ weight: null, reps: 8 }), '8 reps');
@@ -201,6 +219,10 @@ assert.deepEqual(
   ]).map((day) => day.id),
   [1, 3],
 );
+assert.equal(isActiveProgramDay(undefined), true);
+assert.equal(isActiveProgramDay(null), true);
+assert.equal(isActiveProgramDay(''), true);
+assert.equal(isActiveProgramDay('2026-01-01T00:00:00Z'), false);
 
 let review = createManualProgramReview();
 review = applyManualEdit(review, { type: 'rename-program', name: 'Home' }).review;
@@ -238,22 +260,47 @@ const previousStart = progression.indexOf('function formatPreviousSetLine');
 const previousEnd = progression.indexOf('function isLowerBodyCompound');
 const previousLine = progression.slice(previousStart, previousEnd);
 assert.equal(previousStart > 0, true);
-assert.equal(previousLine.includes('formatLegacyLoad'), true);
+assert.equal(previousLine.includes('formatLegacyLoad'), false);
 assert.equal(previousLine.includes('BW +'), false);
-assert.equal(previousLine.includes('+${formatWeight'), false);
+assert.equal(previousLine.includes('+${formatWeight(weight)} lb'), true);
+assert.equal(previousLine.includes('`BW × ${set.reps}`'), true);
 assert.equal(builder.includes('TRACKING_MODE_LABELS'), true);
 assert.equal(builder.includes("type: 'set-load-mode'"), true);
 assert.equal(logger.includes('TRACKING_MODE_LABELS'), true);
 assert.equal(logger.includes('formatTrackedLoad'), true);
+assert.equal(logger.includes('Number(values.weight) || 0'), false);
 assert.equal(history.includes('formatHistorySetLine'), true);
 assert.equal(history.includes('load_mode'), false);
 assert.equal(history.includes('weight_unit'), false);
 assert.equal(history.includes('archived_at'), false);
+const historyIndex = source('app/(tabs)/history/index.tsx');
+assert.equal(historyIndex.includes('archived_at'), false);
 assert.equal(session.includes('prepareTrackedWrite'), true);
 assert.equal(session.includes('PERSIST_LOAD_MODE'), true);
 assert.equal(session.includes('load_mode'), false);
-assert.equal(session.includes('archived_at'), false);
-assert.equal(programs.includes('archived_at'), false);
+assert.equal(session.includes('archived_at'), true);
+assert.equal(session.includes('isMissingColumnError'), true);
+assert.equal(session.includes('ARCHIVED_DAY_MESSAGE'), true);
+const sessionSelect = session.slice(
+  session.indexOf('const SESSION_SELECT_WITH_OVERRIDES'),
+  session.indexOf('async function fetchWorkoutSession'),
+);
+assert.equal(sessionSelect.includes('archived_at'), false);
+const unfinished = session.slice(
+  session.indexOf('export async function listUnfinishedSessions'),
+  session.indexOf('function blockedStartResult'),
+);
+assert.equal(unfinished.includes('archived_at'), false);
+assert.equal(programs.includes('archived_at'), true);
+assert.equal(programs.includes('isMissingColumnError'), true);
+assert.equal(programs.includes('ARCHIVED_DAY_MESSAGE'), true);
+const programDay = source('app/(tabs)/program/[id].tsx');
+assert.equal(programDay.includes('archived_at'), true);
+assert.equal(programDay.includes('isMissingColumnError'), true);
+assert.equal(programDay.includes('ARCHIVED_DAY_MESSAGE'), true);
+const manualClient = source('lib/import/manual-program-client.ts');
+assert.equal(manualClient.includes('archived_at'), true);
+assert.equal(manualClient.includes('isMissingColumnError'), true);
 
 const bannedCalls = [
   'update_owned_program',

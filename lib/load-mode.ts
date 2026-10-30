@@ -73,7 +73,7 @@ function amountLabel(value: number, unit: WeightUnit): string {
 export function formatTrackedLoad(input: {
   loadMode?: LoadMode | null;
   weight?: number | string | null;
-  assistance?: number | null;
+  assistance?: number | string | null;
   weightUnit?: WeightUnit | null;
 }): string {
   if (input.loadMode == null) {
@@ -86,12 +86,17 @@ export function formatTrackedLoad(input: {
   }
   if (input.loadMode === 'added') {
     const weight = typeof input.weight === 'number' ? input.weight : Number(input.weight);
-    if (!Number.isFinite(weight) || weight === 0) {
-      return 'BW';
+    if (!Number.isFinite(weight) || weight <= 0) {
+      return 'BW +';
     }
     return `BW + ${amountLabel(weight, unit)}`;
   }
-  return `Assisted ${amountLabel(input.assistance ?? 0, unit)}`;
+  const assistance =
+    typeof input.assistance === 'number' ? input.assistance : Number(input.assistance);
+  if (!Number.isFinite(assistance) || assistance <= 0) {
+    return 'Assisted';
+  }
+  return `Assisted ${amountLabel(assistance, unit)}`;
 }
 
 export function formatHistorySetLine(input: {
@@ -188,6 +193,10 @@ export function prepareTrackedWrite(input: {
   };
 }
 
+export function isActiveProgramDay(archivedAt: string | null | undefined): boolean {
+  return archivedAt == null || archivedAt === '';
+}
+
 export function visibleProgramDays<T extends { archivedAt?: string | null }>(days: readonly T[]): T[] {
-  return days.filter((day) => day.archivedAt == null || day.archivedAt === '');
+  return days.filter((day) => isActiveProgramDay(day.archivedAt));
 }

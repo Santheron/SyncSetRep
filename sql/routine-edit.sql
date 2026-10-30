@@ -10,7 +10,8 @@
 -- A day with any session keeps its id. Its day_order moves to 100000 + n
 -- so active days can use 1..n without replacing
 -- program_days_program_id_day_order_key.
--- Dropping archived_at later does not restore that day_order.
+-- sql/program-day-archive-rollback.sql refuses while a day is archived or
+-- its day_order is 100000 or higher. It cannot restore the earlier order.
 -- Authorization is auth.uid(). There is no user-id argument and no custom GUC.
 -- The same advisory lock as program activation serializes edits.
 -- A second update_owned_program call with the same payload keeps the same
@@ -338,36 +339,7 @@ BEGIN
     RAISE EXCEPTION 'invalid_import: exercise_name';
   END IF;
 
-  PERFORM pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended('exercise-name:' || normalized, 0)
-  );
-
-  IF EXISTS (
-    SELECT 1
-    FROM public.exercises
-    WHERE owner_user_id IS NULL
-      AND public.normalize_exercise_name(name) = normalized
-  ) THEN
-    RAISE EXCEPTION 'use_catalog_exercise';
-  END IF;
-
-  SELECT id
-  INTO existing_id
-  FROM public.exercises
-  WHERE owner_user_id = p_uid
-    AND public.normalize_exercise_name(name) = normalized
-  ORDER BY id
-  LIMIT 1;
-
-  IF existing_id IS NOT NULL THEN
-    RETURN existing_id;
-  END IF;
-
-  INSERT INTO public.exercises (name, owner_user_id)
-  VALUES (custom_name, p_uid)
-  RETURNING id INTO existing_id;
-
-  RETURN existing_id;
+  RETURN public.create_custom_exercise(custom_name);
 END;
 $resolve$;
 

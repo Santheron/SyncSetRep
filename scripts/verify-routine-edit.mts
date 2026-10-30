@@ -83,6 +83,24 @@ function payload(json: unknown) {
   return `$payload$${JSON.stringify(json)}$payload$::jsonb`;
 }
 
+async function exerciseGrantList() {
+  const result = await psql(`
+    SELECT coalesce(string_agg(privilege_type, ',' ORDER BY privilege_type), '')
+    FROM information_schema.role_table_grants
+    WHERE table_schema = 'public'
+      AND table_name = 'exercises'
+      AND grantee = 'authenticated';
+  `);
+  assert.equal(result.code, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+function assertGrantList(grants: string) {
+  for (const privilege of ['DELETE', 'INSERT', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE']) {
+    assert.equal(grants.split(',').includes(privilege), true, grants);
+  }
+}
+
 const finishedSetsSql = `
   SELECT coalesce(string_agg(
     id::text || ':' || coalesce(weight::text, 'null') || ':' || coalesce(reps::text, 'null'),
@@ -109,6 +127,14 @@ async function main() {
     assert.equal(text.startsWith('-- NOT APPLIED.'), true, path);
     assert.equal(/supabase\.co|postgres:\/\/|password\s*=/i.test(text), false, path);
   }
+  const ownershipRollbackText = await readFile(join(root, 'sql/exercise-ownership-rollback.sql'), 'utf8');
+  assert.match(ownershipRollbackText, /exercise_owner_rollback_blocked/);
+  assert.match(ownershipRollbackText, /owner_user_id was not dropped/);
+  assert.equal(/DROP\s+CONSTRAINT\s+exercises_name_key/i.test(ownershipRollbackText), false);
+  const archiveRollbackText = await readFile(join(root, 'sql/program-day-archive-rollback.sql'), 'utf8');
+  assert.match(archiveRollbackText, /archive_order_rollback_blocked/);
+  assert.match(archiveRollbackText, /archived_at was not dropped/);
+  assert.match(archiveRollbackText, /day_order >= 100000/);
 
   const plannedNames = PLANNED_EXERCISES.map((item) => item.name);
   const normalizedNames = plannedNames.map((name) => normalizeExerciseName(name));
@@ -148,81 +174,76 @@ async function main() {
     const created = await psql(`CREATE DATABASE ${database};`, 'postgres');
     assert.equal(created.code, 0, created.stderr);
 
-    const fixture = await psql(`
-      CREATE SCHEMA auth;
-      CREATE TABLE auth.users (id uuid PRIMARY KEY);
-      CREATE OR REPLACE FUNCTION auth.uid()
-      RETURNS uuid
-      LANGUAGE sql
-      STABLE
-      AS $$
-        SELECT NULLIF(current_setting('request.jwt.claim.sub', true), '')::uuid;
-      $$;
-      CREATE ROLE anon NOLOGIN;
-      CREATE ROLE authenticated NOLOGIN;
-      GRANT USAGE ON SCHEMA auth, public TO anon, authenticated;
-      GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated;
+    const fixture = await psql(await readFile(join(root, 'scripts/fixtures/production-shape.sql'), 'utf8'));
+    assert.equal(fixture.code, 0, fixture.stderr);
+
+    const backupDayOrder = await psql(`
+      SELECT pg_catalog.pg_get_constraintdef(oid)
+      FROM pg_catalog.pg_constraint
+      WHERE conrelid = 'public.program_days'::regclass
+        AND conname = 'program_days_day_order_key';
+    `);
+    assert.equal(backupDayOrder.code, 0, backupDayOrder.stderr);
+    assert.equal(backupDayOrder.stdout.trim(), 'UNIQUE (day_order)');
+    const perProgramBefore = await psql(`
+      SELECT count(*)
+      FROM pg_catalog.pg_constraint
+      WHERE conrelid = 'public.program_days'::regclass
+        AND conname = 'program_days_program_id_day_order_key';
+    `);
+    assert.equal(perProgramBefore.stdout.trim(), '0');
+    const policyBefore = await psql(`
+      SELECT pg_catalog.pg_get_expr(pol.polqual, pol.polrelid)
+      FROM pg_catalog.pg_policy pol
+      WHERE pol.polrelid = 'public.exercises'::regclass
+        AND pol.polname = 'exercises_select_authenticated';
+    `);
+    assert.equal(policyBefore.stdout.trim(), 'true');
+    const cascadeBefore = await psql(`
+      SELECT confdeltype::text
+      FROM pg_catalog.pg_constraint
+      WHERE conname = 'program_exercises_exercise_id_fkey';
+    `);
+    assert.equal(cascadeBefore.stdout.trim(), 'c');
+    const grantsBefore = await exerciseGrantList();
+    assertGrantList(grantsBefore);
+    const anonSelect = await psql(`
+      SELECT has_table_privilege('anon', 'public.exercises', 'SELECT')::text;
+    `);
+    assert.equal(anonSelect.stdout.trim(), 'false');
+
+    const reportedProduction = [
+      'sql/ai-import-day-order.sql',
+      'sql/ai-import-quota.sql',
+      'sql/ai-import-save-program.sql',
+    ];
+    for (const path of reportedProduction) {
+      const applied = await psql(await readFile(join(root, path), 'utf8'));
+      assert.equal(applied.code, 0, `${path}\n${applied.stderr}`);
+    }
+    const currentDayOrder = await psql(`
+      SELECT pg_catalog.pg_get_constraintdef(oid)
+      FROM pg_catalog.pg_constraint
+      WHERE conrelid = 'public.program_days'::regclass
+        AND conname = 'program_days_program_id_day_order_key';
+    `);
+    assert.equal(
+      currentDayOrder.stdout.trim(),
+      'UNIQUE NULLS NOT DISTINCT (program_id, day_order)',
+    );
+    const oldDayOrder = await psql(`
+      SELECT count(*)
+      FROM pg_catalog.pg_constraint
+      WHERE conrelid = 'public.program_days'::regclass
+        AND conname = 'program_days_day_order_key';
+    `);
+    assert.equal(oldDayOrder.stdout.trim(), '0');
+    console.log(
+      'disposable day_order: backup UNIQUE (day_order), then local ai-import-day-order.sql. Live production pg_constraint was not read.',
+    );
+
+    const synthetic = await psql(`
       INSERT INTO auth.users (id) VALUES ('${userA}'), ('${userB}');
-
-      CREATE TABLE public.programs (
-        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        user_id uuid NOT NULL REFERENCES auth.users (id),
-        name text NOT NULL,
-        slug text,
-        is_active boolean NOT NULL DEFAULT true,
-        updated_at timestamptz NOT NULL DEFAULT timestamptz '2026-01-01T00:00:00Z'
-      );
-      CREATE UNIQUE INDEX programs_one_active_per_user_uidx
-        ON public.programs (user_id)
-        WHERE is_active;
-      CREATE TABLE public.program_days (
-        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        program_id bigint REFERENCES public.programs (id),
-        name text NOT NULL,
-        subtitle text,
-        day_order integer NOT NULL,
-        CONSTRAINT program_days_program_id_day_order_key UNIQUE NULLS NOT DISTINCT (program_id, day_order)
-      );
-      CREATE TABLE public.exercises (
-        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        name text NOT NULL
-      );
-      CREATE TABLE public.program_exercises (
-        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        program_day_id bigint NOT NULL REFERENCES public.program_days (id),
-        exercise_id bigint NOT NULL REFERENCES public.exercises (id),
-        exercise_order integer NOT NULL,
-        target_sets integer NOT NULL,
-        min_reps integer,
-        max_reps integer,
-        notes text
-      );
-      CREATE TABLE public.workout_sessions (
-        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        user_id uuid NOT NULL,
-        program_day_id bigint REFERENCES public.program_days (id),
-        started_at timestamptz,
-        finished_at timestamptz
-      );
-      CREATE TABLE public.workout_sets (
-        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        workout_session_id bigint NOT NULL REFERENCES public.workout_sessions (id),
-        exercise_id bigint NOT NULL,
-        set_number integer NOT NULL,
-        weight numeric,
-        reps integer,
-        rir integer,
-        is_completed boolean
-      );
-      ALTER TABLE public.exercises ENABLE ROW LEVEL SECURITY;
-      CREATE POLICY exercises_select_authenticated ON public.exercises
-        FOR SELECT TO authenticated USING (true);
-      GRANT SELECT ON TABLE
-        public.programs, public.program_days, public.program_exercises,
-        public.exercises, public.workout_sessions, public.workout_sets
-        TO authenticated;
-      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticated;
-
       INSERT INTO public.exercises (name) VALUES ('${bench}');
       INSERT INTO public.programs (user_id, name, slug, is_active)
       VALUES
@@ -253,7 +274,19 @@ async function main() {
         (1, 1, 4, NULL, 4, NULL, true),
         (2, 1, 1, 100, 5, 1, false);
     `);
-    assert.equal(fixture.code, 0, fixture.stderr);
+    assert.equal(synthetic.code, 0, synthetic.stderr);
+    const programIds = await psql(`
+      SELECT user_id::text || ':' || id::text
+      FROM public.programs
+      ORDER BY id;
+    `);
+    assert.deepEqual(programIds.stdout.trim().split(/\r?\n/), [`${userA}:1`, `${userB}:2`]);
+    const benchDefaults = await psql(`
+      SELECT exercise_type || '|' || equipment_type
+      FROM public.exercises
+      WHERE id = 1;
+    `);
+    assert.equal(benchDefaults.stdout.trim(), 'weighted|machine');
 
     const finishedBefore = await psql(finishedSetsSql);
     const sessionsBefore = await psql(sessionsSql);
@@ -268,6 +301,19 @@ async function main() {
       const applied = await psql(await readFile(join(root, path), 'utf8'));
       assert.equal(applied.code, 0, `${path}\n${applied.stderr}`);
     }
+    assert.equal(await exerciseGrantList(), grantsBefore);
+    const fkAfter = await psql(`
+      SELECT confdeltype::text
+      FROM pg_catalog.pg_constraint
+      WHERE conname = 'program_exercises_exercise_id_fkey';
+    `);
+    assert.equal(fkAfter.stdout.trim(), 'a');
+    const nameKey = await psql(`
+      SELECT pg_catalog.pg_get_constraintdef(oid)
+      FROM pg_catalog.pg_constraint
+      WHERE conname = 'exercises_name_key';
+    `);
+    assert.equal(nameKey.stdout.trim(), 'UNIQUE (name)');
 
     const finishedAfterMigration = await psql(finishedSetsSql);
     const sessionsAfterMigration = await psql(sessionsSql);
@@ -543,12 +589,30 @@ async function main() {
     const nameAfterLock = await psql(`SELECT name FROM public.programs WHERE id = 1;`);
     assert.equal(nameAfterLock.stdout.trim(), 'Home edited');
 
-    const directDay = await psql(asUser(
-      userA,
-      `UPDATE public.program_days SET name = 'Hacked' WHERE id = 1;`,
-    ));
-    assert.notEqual(directDay.code, 0);
-    assert.match(directDay.stderr, /permission denied/);
+    const ownerDay = await psql(`
+      BEGIN;
+      SELECT set_config('request.jwt.claim.sub', '${userA}', true) \\gset
+      SET LOCAL ROLE authenticated;
+      WITH updated AS (
+        UPDATE public.program_days SET name = 'Temp rename' WHERE id = 1 RETURNING id
+      )
+      SELECT count(*)::text FROM updated;
+      ROLLBACK;
+    `);
+    assert.equal(ownerDay.code, 0, ownerDay.stderr);
+    assert.equal(ownerDay.stdout.trim(), '1');
+    const strangerDay = await psql(`
+      BEGIN;
+      SELECT set_config('request.jwt.claim.sub', '${userB}', true) \\gset
+      SET LOCAL ROLE authenticated;
+      WITH updated AS (
+        UPDATE public.program_days SET name = 'Hacked' WHERE id = 1 RETURNING id
+      )
+      SELECT count(*)::text FROM updated;
+      ROLLBACK;
+    `);
+    assert.equal(strangerDay.code, 0, strangerDay.stderr);
+    assert.equal(strangerDay.stdout.trim(), '0');
     const dayName = await psql(`SELECT name FROM public.program_days WHERE id = 1;`);
     assert.equal(dayName.stdout.trim(), 'Push day');
 
@@ -620,6 +684,30 @@ async function main() {
       ORDER BY id;
     `);
     assert.equal(afterSeed.stdout.trim(), beforeSeed.stdout.trim());
+    const benchUnchanged = await psql(`
+      SELECT exercise_type || '|' || equipment_type
+      FROM public.exercises
+      WHERE id = 1;
+    `);
+    assert.equal(benchUnchanged.stdout.trim(), 'weighted|machine');
+    const pullUp = await psql(`
+      SELECT exercise_type || '|' || equipment_type || '|' || category || '|' || warmup_enabled::text
+      FROM public.exercises
+      WHERE name = 'Pull-Up';
+    `);
+    assert.equal(pullUp.stdout.trim(), 'bodyweight|bodyweight|Back|false');
+    const pushUp = await psql(`
+      SELECT exercise_type || '|' || equipment_type || '|' || category
+      FROM public.exercises
+      WHERE name = 'Push-Up';
+    `);
+    assert.equal(pushUp.stdout.trim(), 'bodyweight|bodyweight|Chest');
+    const bandFlyTaken = await psql(asUser(
+      userA,
+      `SELECT public.create_custom_exercise('Band Fly');`,
+    ));
+    assert.notEqual(bandFlyTaken.code, 0);
+    assert.match(bandFlyTaken.stderr, /use_catalog_exercise/);
     const seededAgain = await psql(`
       SELECT public.seed_standard_exercises($planned$${JSON.stringify(plannedNames)}$planned$::jsonb);
     `);
@@ -677,6 +765,20 @@ async function main() {
     assert.equal(band.code, 0, band.stderr);
     const bandAgain = await psql(asUser(userA, `SELECT public.create_custom_exercise('syncsetrep private fly');`));
     assert.equal(bandAgain.stdout.trim(), band.stdout.trim());
+    const bandShape = await psql(`
+      SELECT coalesce(category, 'null') || '|' || coalesce(exercise_type, 'null') || '|' ||
+        coalesce(equipment_type, 'null') || '|' || warmup_enabled::text
+      FROM public.exercises
+      WHERE id = ${band.stdout.trim()};
+    `);
+    assert.equal(bandShape.stdout.trim(), 'null|null|null|false');
+    const nameTaken = await psql(asUser(
+      userB,
+      `SELECT public.create_custom_exercise('  syncsetrep   private-fly ');`,
+    ));
+    assert.notEqual(nameTaken.code, 0);
+    assert.match(nameTaken.stderr, /exercise_name_taken/);
+    assert.equal(/exercises_name_key/i.test(nameTaken.stderr), false);
     const manualPayload = {
       name: 'Manual Arms',
       days: [
@@ -899,25 +1001,88 @@ async function main() {
     `);
     assert.equal(grants.stdout.trim(), 'true:false:false:false:true:true');
 
+    const bandId = band.stdout.trim();
+    const routinesBeforeDelete = await psql(`
+      SELECT count(*) FROM public.program_exercises WHERE exercise_id = ${bandId};
+    `);
+    assert.notEqual(routinesBeforeDelete.stdout.trim(), '0');
+    const authenticatedDelete = await psql(asUser(
+      userA,
+      `DELETE FROM public.exercises WHERE id = ${bandId};`,
+    ));
+    assert.equal(authenticatedDelete.code, 0, authenticatedDelete.stderr);
+    const customRemains = await psql(`SELECT count(*) FROM public.exercises WHERE id = ${bandId};`);
+    assert.equal(customRemains.stdout.trim(), '1');
+    const routinesAfterAuthenticatedDelete = await psql(`
+      SELECT count(*) FROM public.program_exercises WHERE exercise_id = ${bandId};
+    `);
+    assert.equal(routinesAfterAuthenticatedDelete.stdout.trim(), routinesBeforeDelete.stdout.trim());
+    const ownerDelete = await psql(`DELETE FROM public.exercises WHERE id = ${bandId};`);
+    assert.notEqual(ownerDelete.code, 0);
+    assert.match(ownerDelete.stderr, /program_exercises_exercise_id_fkey/);
+    const customStillThere = await psql(`SELECT count(*) FROM public.exercises WHERE id = ${bandId};`);
+    assert.equal(customStillThere.stdout.trim(), '1');
+
     const finishedBeforeRollback = await psql(finishedSetsSql);
     const sessionsBeforeRollback = await psql(sessionsSql);
     assert.equal(finishedBeforeRollback.stdout.trim(), finishedSnapshot);
     assert.equal(sessionsBeforeRollback.stdout.trim(), sessionSnapshot);
 
-    for (const path of rollbackPaths) {
+    const ownerBeforeRefusal = await psql(`
+      SELECT owner_user_id::text FROM public.exercises WHERE id = ${bandId};
+    `);
+    assert.equal(ownerBeforeRefusal.stdout.trim(), userA);
+    const ownershipRollback = await psql(ownershipRollbackText);
+    assert.notEqual(ownershipRollback.code, 0);
+    assert.match(ownershipRollback.stderr, /exercise_owner_rollback_blocked/);
+    assert.match(ownershipRollback.stderr, /owner_user_id was not dropped/);
+    const ownerAfterRefusal = await psql(`
+      SELECT owner_user_id::text FROM public.exercises WHERE id = ${bandId};
+    `);
+    assert.equal(ownerAfterRefusal.stdout.trim(), userA);
+    const visiblePolicy = await psql(`
+      SELECT count(*)
+      FROM pg_catalog.pg_policy
+      WHERE polrelid = 'public.exercises'::regclass
+        AND polname = 'exercises_select_visible';
+    `);
+    assert.equal(visiblePolicy.stdout.trim(), '1');
+    const oldPolicyAbsent = await psql(`
+      SELECT count(*)
+      FROM pg_catalog.pg_policy
+      WHERE polrelid = 'public.exercises'::regclass
+        AND polname = 'exercises_select_authenticated';
+    `);
+    assert.equal(oldPolicyAbsent.stdout.trim(), '0');
+    const fkStillNoAction = await psql(`
+      SELECT confdeltype::text
+      FROM pg_catalog.pg_constraint
+      WHERE conname = 'program_exercises_exercise_id_fkey';
+    `);
+    assert.equal(fkStillNoAction.stdout.trim(), 'a');
+
+    const archiveRollback = await psql(archiveRollbackText);
+    assert.notEqual(archiveRollback.code, 0);
+    assert.match(archiveRollback.stderr, /archive_order_rollback_blocked/);
+    assert.match(archiveRollback.stderr, /archived_at was not dropped/);
+    const archivedStill = await psql(`
+      SELECT (archived_at IS NOT NULL)::text || ':' || (day_order >= 100000)::text || ':' || id::text
+      FROM public.program_days
+      WHERE id = 2;
+    `);
+    assert.equal(archivedStill.stdout.trim(), 'true:true:2');
+
+    for (const path of ['sql/routine-edit-rollback.sql', 'sql/load-mode-rollback.sql']) {
       const applied = await psql(await readFile(join(root, path), 'utf8'));
       assert.equal(applied.code, 0, `${path}\n${applied.stderr}`);
     }
 
-    const functionsGone = await psql(`
+    const routineFunctionsGone = await psql(`
       SELECT count(*)
       FROM pg_proc
       WHERE pronamespace = 'public'::regnamespace
         AND proname IN (
           'record_tracked_set',
-          'seed_standard_exercises',
-          'create_custom_exercise',
-          'normalize_exercise_name',
           'resolve_routine_exercise',
           'routine_write_days',
           'routine_normalize_days',
@@ -926,8 +1091,119 @@ async function main() {
           'save_manual_program'
         );
     `);
-    assert.equal(functionsGone.stdout.trim(), '0');
-    const columnsGone = await psql(`
+    assert.equal(routineFunctionsGone.stdout.trim(), '0');
+    const ownershipFunctionsRemain = await psql(`
+      SELECT count(*)
+      FROM pg_proc
+      WHERE pronamespace = 'public'::regnamespace
+        AND proname IN (
+          'seed_standard_exercises',
+          'create_custom_exercise',
+          'normalize_exercise_name'
+        );
+    `);
+    assert.equal(ownershipFunctionsRemain.stdout.trim(), '3');
+    const preservedColumns = await psql(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND (
+          (table_name = 'program_days' AND column_name = 'archived_at')
+          OR (table_name = 'exercises' AND column_name = 'owner_user_id')
+        )
+      ORDER BY column_name;
+    `);
+    assert.deepEqual(preservedColumns.stdout.trim().split(/\r?\n/), ['archived_at', 'owner_user_id']);
+    const loadColumnsGone = await psql(`
+      SELECT count(*)
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND (
+          (table_name = 'workout_sets' AND column_name IN ('load_mode', 'assistance', 'weight_unit'))
+          OR (table_name = 'program_exercises' AND column_name = 'load_mode')
+        );
+    `);
+    assert.equal(loadColumnsGone.stdout.trim(), '0');
+    const stillLinked = await psql(`SELECT program_day_id::text FROM public.workout_sessions WHERE id = 1;`);
+    assert.equal(stillLinked.stdout.trim(), '2');
+    const finishedAfterRefusal = await psql(finishedSetsSql);
+    const sessionsAfterRefusal = await psql(sessionsSql);
+    assert.equal(finishedAfterRefusal.stdout.trim(), finishedSnapshot);
+    assert.equal(sessionsAfterRefusal.stdout.trim(), sessionSnapshot);
+    assert.equal(await exerciseGrantList(), grantsBefore);
+    const nameKeyRemains = await psql(`
+      SELECT pg_catalog.pg_get_constraintdef(oid)
+      FROM pg_catalog.pg_constraint
+      WHERE conname = 'exercises_name_key';
+    `);
+    assert.equal(nameKeyRemains.stdout.trim(), 'UNIQUE (name)');
+    const dayOrderRemains = await psql(`
+      SELECT pg_catalog.pg_get_constraintdef(oid)
+      FROM pg_catalog.pg_constraint
+      WHERE conname = 'program_days_program_id_day_order_key';
+    `);
+    assert.equal(
+      dayOrderRemains.stdout.trim(),
+      'UNIQUE NULLS NOT DISTINCT (program_id, day_order)',
+    );
+    const routinesAfterRefusal = await psql(`
+      SELECT count(*) FROM public.program_exercises WHERE exercise_id = ${bandId};
+    `);
+    assert.equal(routinesAfterRefusal.stdout.trim(), routinesBeforeDelete.stdout.trim());
+    const benchRemains = await psql(`SELECT name FROM public.exercises WHERE id = 1;`);
+    assert.equal(benchRemains.stdout.trim(), bench);
+
+    const safeDatabase = 'routine_edit_safe';
+    const createdSafe = await psql(`CREATE DATABASE ${safeDatabase};`, 'postgres');
+    assert.equal(createdSafe.code, 0, createdSafe.stderr);
+    const safe = (sql: string) => psql(sql, safeDatabase);
+    const safeFixture = await safe(await readFile(join(root, 'scripts/fixtures/production-shape.sql'), 'utf8'));
+    assert.equal(safeFixture.code, 0, safeFixture.stderr);
+    const safeDayOrder = await safe(await readFile(join(root, 'sql/ai-import-day-order.sql'), 'utf8'));
+    assert.equal(safeDayOrder.code, 0, safeDayOrder.stderr);
+    const safeGrants = await safe(`
+      SELECT coalesce(string_agg(privilege_type, ',' ORDER BY privilege_type), '')
+      FROM information_schema.role_table_grants
+      WHERE table_schema = 'public'
+        AND table_name = 'exercises'
+        AND grantee = 'authenticated';
+    `);
+    assert.equal(safeGrants.code, 0, safeGrants.stderr);
+    assertGrantList(safeGrants.stdout.trim());
+    const safeRows = await safe(`
+      INSERT INTO auth.users (id) VALUES ('${userA}');
+      INSERT INTO public.exercises (name) VALUES ('${bench}');
+      INSERT INTO public.programs (user_id, name, slug, is_active)
+      VALUES ('${userA}', 'Home', NULL, true);
+      INSERT INTO public.program_days (program_id, name, subtitle, day_order)
+      VALUES (1, 'Push', NULL, 1);
+      INSERT INTO public.program_exercises (
+        program_day_id, exercise_id, exercise_order, target_sets, min_reps, max_reps, notes
+      )
+      VALUES (1, 1, 1, 3, 8, 10, NULL);
+      INSERT INTO public.workout_sessions (user_id, program_day_id, started_at, finished_at)
+      VALUES ('${userA}', 1, timestamptz '2026-01-02T00:00:00Z', timestamptz '2026-01-02T01:00:00Z');
+      INSERT INTO public.workout_sets (
+        workout_session_id, exercise_id, set_number, weight, reps, rir, is_completed
+      )
+      VALUES (1, 1, 1, 135, 5, 2, true);
+    `);
+    assert.equal(safeRows.code, 0, safeRows.stderr);
+    for (const path of sqlPaths) {
+      const applied = await safe(await readFile(join(root, path), 'utf8'));
+      assert.equal(applied.code, 0, `${path}\n${applied.stderr}`);
+    }
+    const safeEmpty = await safe(`
+      SELECT
+        (SELECT count(*) FROM public.exercises WHERE owner_user_id IS NOT NULL)::text || ':' ||
+        (SELECT count(*) FROM public.program_days WHERE archived_at IS NOT NULL OR day_order >= 100000)::text;
+    `);
+    assert.equal(safeEmpty.stdout.trim(), '0:0');
+    for (const path of rollbackPaths) {
+      const applied = await safe(await readFile(join(root, path), 'utf8'));
+      assert.equal(applied.code, 0, `${path}\n${applied.stderr}`);
+    }
+    const safeColumns = await safe(`
       SELECT count(*)
       FROM information_schema.columns
       WHERE table_schema = 'public'
@@ -938,28 +1214,66 @@ async function main() {
           OR (table_name = 'exercises' AND column_name = 'owner_user_id')
         );
     `);
-    assert.equal(columnsGone.stdout.trim(), '0');
-    const archivedOrder = await psql(`
-      SELECT (day_order >= 100000)::text || ':' || id::text
-      FROM public.program_days
-      WHERE id = 2;
+    assert.equal(safeColumns.stdout.trim(), '0');
+    const safePolicy = await safe(`
+      SELECT pol.polname || ':' || pg_catalog.pg_get_expr(pol.polqual, pol.polrelid)
+      FROM pg_catalog.pg_policy pol
+      WHERE pol.polrelid = 'public.exercises'::regclass
+        AND pol.polname = 'exercises_select_authenticated';
     `);
-    assert.equal(archivedOrder.stdout.trim(), 'true:2');
-    const stillLinked = await psql(`SELECT program_day_id::text FROM public.workout_sessions WHERE id = 1;`);
-    assert.equal(stillLinked.stdout.trim(), '2');
-    const finishedAfterRollback = await psql(finishedSetsSql);
-    const sessionsAfterRollback = await psql(sessionsSql);
-    assert.equal(finishedAfterRollback.stdout.trim(), finishedSnapshot);
-    assert.equal(sessionsAfterRollback.stdout.trim(), sessionSnapshot);
-    const restoredPolicy = await psql(`
-      SELECT count(*)
-      FROM pg_policy
-      WHERE polrelid = 'public.exercises'::regclass
-        AND polname = 'exercises_select_authenticated';
+    assert.equal(safePolicy.stdout.trim(), 'exercises_select_authenticated:true');
+    const safeGrantsAfter = await safe(`
+      SELECT coalesce(string_agg(privilege_type, ',' ORDER BY privilege_type), '')
+      FROM information_schema.role_table_grants
+      WHERE table_schema = 'public'
+        AND table_name = 'exercises'
+        AND grantee = 'authenticated';
     `);
-    assert.equal(restoredPolicy.stdout.trim(), '1');
-    const benchRemains = await psql(`SELECT name FROM public.exercises WHERE id = 1;`);
-    assert.equal(benchRemains.stdout.trim(), bench);
+    assert.equal(safeGrantsAfter.stdout.trim(), safeGrants.stdout.trim());
+    const safeFk = await safe(`
+      SELECT confdeltype::text
+      FROM pg_catalog.pg_constraint
+      WHERE conname = 'program_exercises_exercise_id_fkey';
+    `);
+    assert.equal(safeFk.stdout.trim(), 'c');
+    const safeNameKey = await safe(`
+      SELECT pg_catalog.pg_get_constraintdef(oid)
+      FROM pg_catalog.pg_constraint
+      WHERE conname = 'exercises_name_key';
+    `);
+    assert.equal(safeNameKey.stdout.trim(), 'UNIQUE (name)');
+    const safeHistory = await safe(`
+      SELECT weight::text || ':' || reps::text
+      FROM public.workout_sets
+      WHERE id = 1;
+    `);
+    assert.equal(safeHistory.stdout.trim(), '135:5');
+    const safeProbe = await safe(`
+      INSERT INTO public.exercises (name) VALUES ('Cascade Probe') RETURNING id;
+    `);
+    assert.equal(safeProbe.code, 0, safeProbe.stderr);
+    const probeId = safeProbe.stdout.trim();
+    const safeLink = await safe(`
+      INSERT INTO public.program_exercises (
+        program_day_id, exercise_id, exercise_order, target_sets, min_reps, max_reps
+      )
+      VALUES (1, ${probeId}, 2, 3, 8, 10);
+    `);
+    assert.equal(safeLink.code, 0, safeLink.stderr);
+    const safeCascade = await safe(`
+      BEGIN;
+      DELETE FROM public.exercises WHERE id = ${probeId};
+      SELECT count(*)::text FROM public.program_exercises WHERE exercise_id = ${probeId};
+      ROLLBACK;
+    `);
+    assert.equal(safeCascade.code, 0, safeCascade.stderr);
+    assert.equal(safeCascade.stdout.trim(), '0');
+    const safeRestored = await safe(`
+      SELECT
+        (SELECT count(*) FROM public.exercises WHERE id = ${probeId})::text || ':' ||
+        (SELECT count(*) FROM public.program_exercises WHERE exercise_id = ${probeId})::text;
+    `);
+    assert.equal(safeRestored.stdout.trim(), '1:1');
 
     console.log('routine edit checks passed');
     console.log(`finished sets preserved: ${finishedSnapshot}`);

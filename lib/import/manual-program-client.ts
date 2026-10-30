@@ -10,6 +10,7 @@ import {
   type SavedProgramSummary,
 } from './manual-program.ts';
 import { NO_ACTIVE_PROGRAM_MESSAGE } from '../active-program.ts';
+import { isMissingColumnError } from '../postgrest.ts';
 import {
   equipmentFromType,
   muscleFromCategory,
@@ -231,11 +232,20 @@ async function defaultSelectDraftProgram(userId: string, programId: string) {
 
 async function defaultSelectDraftDays(programId: string) {
   const { supabase } = await import('../supabase.ts');
-  const result = await supabase
+  const withArchive = await supabase
     .from('program_days')
-    .select(DRAFT_DAY_COLUMNS)
+    .select(`${DRAFT_DAY_COLUMNS}, archived_at`)
     .eq('program_id', programId)
+    .is('archived_at', null)
     .order('day_order', { ascending: true });
+  const result =
+    withArchive.error && isMissingColumnError(withArchive.error, 'archived_at')
+      ? await supabase
+          .from('program_days')
+          .select(DRAFT_DAY_COLUMNS)
+          .eq('program_id', programId)
+          .order('day_order', { ascending: true })
+      : withArchive;
   return {
     data: (result.data ?? null) as DraftDayRow[] | null,
     error: result.error,

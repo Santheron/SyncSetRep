@@ -1,4 +1,4 @@
-import { formatLegacyLoad, formatTrackedLoad, type LoadMode, type WeightUnit } from '@/lib/load-mode';
+import { formatTrackedLoad, type LoadMode, type WeightUnit } from '@/lib/load-mode';
 import { formatWeight } from '@/lib/warmup';
 import { formatWorkoutDate } from '@/lib/workout-format';
 
@@ -338,7 +338,7 @@ function formatPreviousSetLine(set: WorkingSet, isBodyweight: boolean): string {
   } else if (isBodyweight) {
     line =
       weight !== null && weight > 0
-        ? `${formatLegacyLoad(weight)} × ${set.reps}`
+        ? `+${formatWeight(weight)} lb × ${set.reps}`
         : `BW × ${set.reps}`;
   } else if (weight !== null && weight > 0) {
     line = `${formatWeight(weight)} lb × ${set.reps}`;

@@ -14,7 +14,7 @@ export const CUSTOM_EXERCISE_PLAN = {
   ownership:
     'A custom exercise would be a new row owned by auth.uid(). Other accounts would not be able to read or change it.',
   permissions:
-    'A later reviewed migration would add owner-only insert, update, and delete. It would not grant those writes on the shared library.',
+    'A later reviewed migration would add owner-only insert and update. It would not add a delete policy. The program-exercise foreign key would change from ON DELETE CASCADE to NO ACTION, so deleting a custom exercise cannot remove routine rows. It would not grant new writes on the shared library.',
   history:
     'Workout history stores exercise ids. A custom exercise needs its own id and must not rename or reuse an id that existing sets already use.',
   notInThisChange:

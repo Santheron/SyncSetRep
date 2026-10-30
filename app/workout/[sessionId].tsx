@@ -657,10 +657,10 @@ export default function ActiveWorkoutScreen() {
                               weight:
                                 (tracking[exerciseId]?.loadMode ?? null) === 'assisted'
                                   ? null
-                                  : Number(values.weight) || 0,
+                                  : values.weight,
                               assistance:
                                 (tracking[exerciseId]?.loadMode ?? null) === 'assisted'
-                                  ? Number(values.weight) || 0
+                                  ? values.weight
                                   : null,
                               weightUnit: tracking[exerciseId]?.weightUnit ?? 'lb',
                             })}

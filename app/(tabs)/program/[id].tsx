@@ -5,7 +5,9 @@ import { Link, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
 import { EDIT_DAY_LABEL } from '@/lib/import/manual-program';
-import { loadActiveProgram } from '@/lib/programs';
+import { isActiveProgramDay } from '@/lib/load-mode';
+import { isMissingColumnError } from '@/lib/postgrest';
+import { ARCHIVED_DAY_MESSAGE, loadActiveProgram } from '@/lib/programs';
 import { supabase } from '@/lib/supabase';
 import { buttonPaletteForSurface } from '@/lib/ui/button-contrast';
 
@@ -87,13 +89,23 @@ export default function ProgramDayScreen() {
         return;
       }
 
+      const dayWithArchive = await supabase
+        .from('program_days')
+        .select('id, name, subtitle, archived_at')
+        .eq('id', programDayId)
+        .eq('program_id', programResult.data)
+        .maybeSingle();
+      const dayQuery =
+        dayWithArchive.error && isMissingColumnError(dayWithArchive.error, 'archived_at')
+          ? supabase
+              .from('program_days')
+              .select('id, name, subtitle')
+              .eq('id', programDayId)
+              .eq('program_id', programResult.data)
+              .maybeSingle()
+          : Promise.resolve(dayWithArchive);
       const [dayResult, exercisesResult] = await Promise.all([
-        supabase
-          .from('program_days')
-          .select('id, name, subtitle')
-          .eq('id', programDayId)
-          .eq('program_id', programResult.data)
-          .single(),
+        dayQuery,
         supabase
           .from('program_exercises')
           .select(
@@ -156,6 +168,15 @@ export default function ProgramDayScreen() {
             .join(' | '),
         );
         setProgramDay(dayResult.data);
+        setExercises([]);
+        setIsLoading(false);
+        return;
+      }
+
+      const archivedAt = (dayResult.data as { archived_at?: string | null } | null)?.archived_at;
+      if (dayResult.data && !isActiveProgramDay(archivedAt)) {
+        setErrorMessage(ARCHIVED_DAY_MESSAGE);
+        setProgramDay(null);
         setExercises([]);
         setIsLoading(false);
         return;

@@ -9,7 +9,8 @@
 -- program_days_program_id_day_order_key.
 -- Sessions keep the same program_day_id. This file does not read or write
 -- workout_sessions or workout_sets.
--- Rollback drops archived_at only. It does not restore a previous day_order.
+-- Rollback refuses to drop archived_at when any day is archived or any
+-- day_order is 100000 or higher. It does not restore a previous day_order.
 
 BEGIN;
 
