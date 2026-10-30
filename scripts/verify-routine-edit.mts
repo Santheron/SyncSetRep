@@ -134,6 +134,10 @@ async function main() {
   const archiveRollbackText = await readFile(join(root, 'sql/program-day-archive-rollback.sql'), 'utf8');
   assert.match(archiveRollbackText, /archive_order_rollback_blocked/);
   assert.match(archiveRollbackText, /archived_at was not dropped/);
+  const loadRollbackText = await readFile(join(root, 'sql/load-mode-rollback.sql'), 'utf8');
+  assert.match(loadRollbackText, /load_mode_rollback_blocked/);
+  assert.match(loadRollbackText, /tracking columns were not dropped/);
+  assert.equal(/UPDATE\s+public\.workout_sets\s+SET\s+weight/i.test(loadRollbackText), false);
   assert.match(archiveRollbackText, /day_order >= 100000/);
 
   const plannedNames = PLANNED_EXERCISES.map((item) => item.name);
@@ -199,12 +203,24 @@ async function main() {
         AND pol.polname = 'exercises_select_authenticated';
     `);
     assert.equal(policyBefore.stdout.trim(), 'true');
-    const cascadeBefore = await psql(`
-      SELECT confdeltype::text
+    const confirmedLiveDayOrder = 'UNIQUE NULLS NOT DISTINCT (program_id, day_order)';
+    const deleteActions = await psql(`
+      SELECT conname || ':' || confdeltype::text
       FROM pg_catalog.pg_constraint
-      WHERE conname = 'program_exercises_exercise_id_fkey';
+      WHERE conname IN (
+        'program_exercises_exercise_id_fkey',
+        'program_exercises_program_day_id_fkey',
+        'program_template_exercises_exercise_id_fkey',
+        'workout_sets_exercise_id_fkey'
+      )
+      ORDER BY conname;
     `);
-    assert.equal(cascadeBefore.stdout.trim(), 'c');
+    assert.deepEqual(deleteActions.stdout.trim().split(/\r?\n/), [
+      'program_exercises_exercise_id_fkey:c',
+      'program_exercises_program_day_id_fkey:c',
+      'program_template_exercises_exercise_id_fkey:a',
+      'workout_sets_exercise_id_fkey:a',
+    ]);
     const grantsBefore = await exerciseGrantList();
     assertGrantList(grantsBefore);
     const anonSelect = await psql(`
@@ -227,10 +243,7 @@ async function main() {
       WHERE conrelid = 'public.program_days'::regclass
         AND conname = 'program_days_program_id_day_order_key';
     `);
-    assert.equal(
-      currentDayOrder.stdout.trim(),
-      'UNIQUE NULLS NOT DISTINCT (program_id, day_order)',
-    );
+    assert.equal(currentDayOrder.stdout.trim(), confirmedLiveDayOrder);
     const oldDayOrder = await psql(`
       SELECT count(*)
       FROM pg_catalog.pg_constraint
@@ -239,7 +252,7 @@ async function main() {
     `);
     assert.equal(oldDayOrder.stdout.trim(), '0');
     console.log(
-      'disposable day_order: backup UNIQUE (day_order), then local ai-import-day-order.sql. Live production pg_constraint was not read.',
+      `disposable day_order matches confirmed live production: ${confirmedLiveDayOrder}`,
     );
 
     const synthetic = await psql(`
@@ -1072,17 +1085,45 @@ async function main() {
     `);
     assert.equal(archivedStill.stdout.trim(), 'true:true:2');
 
-    for (const path of ['sql/routine-edit-rollback.sql', 'sql/load-mode-rollback.sql']) {
-      const applied = await psql(await readFile(join(root, path), 'utf8'));
-      assert.equal(applied.code, 0, `${path}\n${applied.stderr}`);
-    }
+    const routineRollback = await psql(await readFile(join(root, 'sql/routine-edit-rollback.sql'), 'utf8'));
+    assert.equal(routineRollback.code, 0, routineRollback.stderr);
+    const trackedBeforeRefusal = await psql(`
+      SELECT load_mode || ':' || weight::text || ':' || coalesce(assistance::text, 'null') || ':' || weight_unit
+      FROM public.workout_sets
+      WHERE workout_session_id = 2 AND set_number = 1;
+    `);
+    assert.equal(trackedBeforeRefusal.stdout.trim(), 'added:15:null:kg');
+    const prescriptionsBeforeRefusal = await psql(`
+      SELECT count(*) FROM public.program_exercises WHERE load_mode IS NOT NULL;
+    `);
+    assert.notEqual(prescriptionsBeforeRefusal.stdout.trim(), '0');
+    const loadRollback = await psql(loadRollbackText);
+    assert.notEqual(loadRollback.code, 0);
+    assert.match(loadRollback.stderr, /load_mode_rollback_blocked/);
+    assert.match(loadRollback.stderr, /tracking columns were not dropped/);
+    const trackedAfterRefusal = await psql(`
+      SELECT load_mode || ':' || weight::text || ':' || coalesce(assistance::text, 'null') || ':' || weight_unit
+      FROM public.workout_sets
+      WHERE workout_session_id = 2 AND set_number = 1;
+    `);
+    assert.equal(trackedAfterRefusal.stdout.trim(), trackedBeforeRefusal.stdout.trim());
+    const prescriptionsAfterRefusal = await psql(`
+      SELECT count(*) FROM public.program_exercises WHERE load_mode IS NOT NULL;
+    `);
+    assert.equal(prescriptionsAfterRefusal.stdout.trim(), prescriptionsBeforeRefusal.stdout.trim());
+    const trackedFunctionRemains = await psql(`
+      SELECT count(*)
+      FROM pg_proc
+      WHERE pronamespace = 'public'::regnamespace
+        AND proname = 'record_tracked_set';
+    `);
+    assert.equal(trackedFunctionRemains.stdout.trim(), '1');
 
     const routineFunctionsGone = await psql(`
       SELECT count(*)
       FROM pg_proc
       WHERE pronamespace = 'public'::regnamespace
         AND proname IN (
-          'record_tracked_set',
           'resolve_routine_exercise',
           'routine_write_days',
           'routine_normalize_days',
@@ -1114,7 +1155,7 @@ async function main() {
       ORDER BY column_name;
     `);
     assert.deepEqual(preservedColumns.stdout.trim().split(/\r?\n/), ['archived_at', 'owner_user_id']);
-    const loadColumnsGone = await psql(`
+    const loadColumnsRemain = await psql(`
       SELECT count(*)
       FROM information_schema.columns
       WHERE table_schema = 'public'
@@ -1123,7 +1164,7 @@ async function main() {
           OR (table_name = 'program_exercises' AND column_name = 'load_mode')
         );
     `);
-    assert.equal(loadColumnsGone.stdout.trim(), '0');
+    assert.equal(loadColumnsRemain.stdout.trim(), '4');
     const stillLinked = await psql(`SELECT program_day_id::text FROM public.workout_sessions WHERE id = 1;`);
     assert.equal(stillLinked.stdout.trim(), '2');
     const finishedAfterRefusal = await psql(finishedSetsSql);
@@ -1196,9 +1237,12 @@ async function main() {
     const safeEmpty = await safe(`
       SELECT
         (SELECT count(*) FROM public.exercises WHERE owner_user_id IS NOT NULL)::text || ':' ||
-        (SELECT count(*) FROM public.program_days WHERE archived_at IS NOT NULL OR day_order >= 100000)::text;
+        (SELECT count(*) FROM public.program_days WHERE archived_at IS NOT NULL OR day_order >= 100000)::text || ':' ||
+        (SELECT count(*) FROM public.workout_sets
+          WHERE load_mode IS NOT NULL OR assistance IS NOT NULL OR weight_unit IS NOT NULL)::text || ':' ||
+        (SELECT count(*) FROM public.program_exercises WHERE load_mode IS NOT NULL)::text;
     `);
-    assert.equal(safeEmpty.stdout.trim(), '0:0');
+    assert.equal(safeEmpty.stdout.trim(), '0:0:0:0');
     for (const path of rollbackPaths) {
       const applied = await safe(await readFile(join(root, path), 'utf8'));
       assert.equal(applied.code, 0, `${path}\n${applied.stderr}`);
@@ -1215,6 +1259,13 @@ async function main() {
         );
     `);
     assert.equal(safeColumns.stdout.trim(), '0');
+    const safeTrackedFunction = await safe(`
+      SELECT count(*)
+      FROM pg_proc
+      WHERE pronamespace = 'public'::regnamespace
+        AND proname = 'record_tracked_set';
+    `);
+    assert.equal(safeTrackedFunction.stdout.trim(), '0');
     const safePolicy = await safe(`
       SELECT pol.polname || ':' || pg_catalog.pg_get_expr(pol.polqual, pol.polrelid)
       FROM pg_catalog.pg_policy pol

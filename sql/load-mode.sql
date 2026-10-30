@@ -8,8 +8,9 @@
 -- record_tracked_set writes only an unfinished session owned by auth.uid().
 -- A finished session raises history_locked and is left unchanged.
 -- The phone must not call record_tracked_set while PERSIST_LOAD_MODE is false.
--- Rollback: sql/load-mode-rollback.sql. Dropping the new columns does not
--- restore a weight that record_tracked_set already wrote on an unfinished set.
+-- Rollback: sql/load-mode-rollback.sql. It refuses while any load_mode,
+-- assistance, or weight_unit value is stored. When every value is NULL,
+-- dropping the columns leaves workout_sets.weight unchanged.
 -- Finished historical weights are never written by this function.
 
 BEGIN;

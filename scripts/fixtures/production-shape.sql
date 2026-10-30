@@ -2,9 +2,15 @@
 -- Tables, constraints, indexes, grants, policies, and the signup trigger
 -- match the 2026-10-29 backup for the workout schema. There are no user rows.
 -- Storage, realtime, cardio, and body metrics are omitted.
--- sql/ai-import-day-order.sql is applied by the test after this file because
--- that migration was reported applied after the backup. This file still
--- creates the backup constraint program_days_day_order_key.
+-- A read-only production check confirmed the live constraint
+-- program_days_program_id_day_order_key UNIQUE NULLS NOT DISTINCT
+-- (program_id, day_order), exercises_name_key UNIQUE (name), authenticated
+-- GRANT ALL on public.exercises, both program_exercises foreign keys
+-- ON DELETE CASCADE, and no cascading delete from workout_sets.exercise_id
+-- or program_template_exercises.exercise_id.
+-- This file still creates the older backup constraint
+-- program_days_day_order_key. The test applies sql/ai-import-day-order.sql
+-- locally afterward. Do not run that file on production again.
 
 CREATE SCHEMA IF NOT EXISTS auth;
 
