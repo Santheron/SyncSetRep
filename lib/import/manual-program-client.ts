@@ -3,8 +3,10 @@ import {
   MANUAL_SIGN_IN_SAVE_MESSAGE,
   MANUAL_SIGN_IN_SWITCH_MESSAGE,
   saveManualProgram,
+  saveOwnedProgramEdit,
   toSavedPrograms,
   type CatalogExercise,
+  type OwnedProgramEditRpc,
   type OwnedProgramRow,
   type OwnedProgramSaveRpc,
   type SavedProgramSummary,
@@ -404,6 +406,39 @@ function manualSaveErrors(errors: readonly string[]): string[] {
   return errors.map((error) =>
     error === IMPORT_SIGN_IN_MESSAGE ? MANUAL_SIGN_IN_SAVE_MESSAGE : error,
   );
+}
+
+export const OWNED_PROGRAM_EDIT_ENABLED = false;
+
+async function defaultEditRpc(args: Parameters<OwnedProgramEditRpc>[0]) {
+  const { supabase } = await import('../supabase.ts');
+  const result = await supabase.rpc('update_owned_program', args);
+  return { data: result.data, error: result.error };
+}
+
+export async function saveOwnedProgramEditForCurrentUser(
+  review: ProgramReview,
+  target: { programId: string },
+  io?: {
+    getUserId?: () => Promise<UserIdResult>;
+    rpc?: OwnedProgramEditRpc;
+    subtitleRequired?: boolean;
+    allowCustomExercises?: boolean;
+  },
+): Promise<SaveImportedProgramResult> {
+  const getUserId = io?.getUserId ?? defaultGetUserId;
+  const rpc = io?.rpc ?? (OWNED_PROGRAM_EDIT_ENABLED ? defaultEditRpc : undefined);
+  const user = await getUserId();
+  if (!user.ok || user.data.trim() === '') {
+    return { ok: false, errors: [MANUAL_SIGN_IN_SAVE_MESSAGE] };
+  }
+  return saveOwnedProgramEdit(review, {
+    userId: user.data,
+    programId: target.programId,
+    rpc,
+    subtitleRequired: io?.subtitleRequired,
+    allowCustomExercises: io?.allowCustomExercises,
+  });
 }
 
 export const ACTIVATION_RPC_ENABLED = false;

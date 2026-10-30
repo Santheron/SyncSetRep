@@ -21,6 +21,7 @@ import {
   CHOOSE_EXERCISE_LABEL,
   DAY_ADDED_LOCALLY_MESSAGE,
   EDIT_DRAFT_NOTICE,
+  EDIT_SAVED_MESSAGE,
   FIRST_PROGRAM_NOTICE,
   LOCAL_DAY_NOTICE,
   MANUAL_SAVE_ONCE_MESSAGE,
@@ -51,6 +52,7 @@ import {
   type ManualEdit,
 } from '@/lib/import/manual-program';
 import {
+  CUSTOM_EXERCISE_WRITES_ENABLED,
   EQUIPMENT_TYPES,
   MUSCLE_GROUPS,
   PLANNED_EXERCISES,
@@ -72,6 +74,7 @@ type ManualProgramBuilderProps = {
   savedProgramId: string | null;
   onChange: (review: ProgramReview) => void;
   onSave: () => void;
+  onSaveCustomExercise?: (name: string) => void;
 };
 
 function numberText(value: number | null | undefined): string {
@@ -89,6 +92,7 @@ export function ManualProgramBuilder({
   savedProgramId,
   onChange,
   onSave,
+  onSaveCustomExercise,
 }: ManualProgramBuilderProps) {
   const scrollRef = useRef<ScrollView>(null);
   const dayOffsets = useRef<Record<number, number>>({});
@@ -175,7 +179,11 @@ export function ManualProgramBuilder({
     customKey !== '' &&
     !choices.some((exercise) => normalizeExerciseName(exercise.name) === customKey);
   const saveLabel = editing || hasActiveProgram ? SAVE_ROUTINE_LABEL : SAVE_FIRST_ROUTINE_LABEL;
-  const savedMessage = hasActiveProgram ? MANUAL_SAVED_INACTIVE_MESSAGE : MANUAL_SAVED_CURRENT_MESSAGE;
+  const savedMessage = editing
+    ? EDIT_SAVED_MESSAGE
+    : hasActiveProgram
+      ? MANUAL_SAVED_INACTIVE_MESSAGE
+      : MANUAL_SAVED_CURRENT_MESSAGE;
 
   return (
     <Screen ref={scrollRef} keyboardShouldPersistTaps="handled">
@@ -534,6 +542,15 @@ export function ManualProgramBuilder({
                 style={styles.catalogRow}>
                 <Text style={styles.choiceLabel}>Use "{customName}"</Text>
                 <Text style={styles.catalogMeta}>Your exercise · Not saved to the library yet</Text>
+              </Pressable>
+            ) : null}
+            {CUSTOM_EXERCISE_WRITES_ENABLED && customReady ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Save ${customName} to your library`}
+                onPress={() => onSaveCustomExercise?.(customName)}
+                style={styles.catalogRow}>
+                <Text style={styles.choiceLabel}>Save "{customName}" to your library</Text>
               </Pressable>
             ) : null}
             <FlatList

@@ -25,6 +25,8 @@ export type ReviewDay = {
   name: string;
   subtitle: string | null;
   exercises: ReviewExercise[];
+  /** Stored program_days.id. A new day has none, so an edit can archive the old row instead of reusing it. */
+  storedDayId?: string | null;
 };
 
 export type ProgramReview = {
@@ -59,6 +61,7 @@ function copyDay(day: ReviewDay): ReviewDay {
   return {
     name: day.name,
     subtitle: day.subtitle,
+    storedDayId: day.storedDayId ?? null,
     exercises: day.exercises.map(copyExercise),
   };
 }

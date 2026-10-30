@@ -209,6 +209,24 @@ try {
   assert.equal(trackedReview.review.days[0]?.exercises[0]?.loadMode, 'assisted');
   assert.equal(trackedReview.review.days[0]?.exercises[1]?.loadMode ?? null, null);
   assert.equal(validateManualRoutine(trackedReview.review).ok, true);
+  assert.equal(
+    validateManualRoutine(trackedReview.review, { subtitleRequired: true }).ok,
+    false,
+  );
+  const subtitled = applyManualEdit(trackedReview.review, {
+    type: 'set-subtitle',
+    dayIndex: 1,
+    subtitle: 'Pull day',
+  });
+  const subtitledAgain = applyManualEdit(subtitled.review, {
+    type: 'set-subtitle',
+    dayIndex: 2,
+    subtitle: 'Push day',
+  });
+  assert.equal(
+    validateManualRoutine(subtitledAgain.review, { subtitleRequired: true }).ok,
+    true,
+  );
   const trackedPreview = JSON.stringify(toImportPreview(trackedReview.review));
   assert.equal(trackedPreview.includes('loadMode'), false);
   assert.equal(trackedPreview.includes('load_mode'), false);
@@ -1359,12 +1377,14 @@ try {
   assert.equal(builderSource.includes('DAY_ADDED_LOCALLY_MESSAGE'), true);
   assert.equal(builderSource.includes('mergeExerciseChoices'), true);
   assert.equal(builderSource.includes('MUSCLE_GROUPS'), true);
-  assert.equal(buildScreen.includes('previewProgramEdit(review, draftUserId)'), true);
+  assert.equal(buildScreen.includes('saveOwnedProgramEditForCurrentUser(review'), true);
+  assert.equal(buildScreen.includes('previewProgramEdit(review, draftUserId)'), false);
   assert.equal(
-    buildScreen.indexOf('previewProgramEdit(review, draftUserId)') <
+    buildScreen.indexOf('saveOwnedProgramEditForCurrentUser(review') <
       buildScreen.indexOf('saveManualProgramForCurrentUser(review)'),
     true,
   );
+  assert.equal(clientSource.includes('OWNED_PROGRAM_EDIT_ENABLED = false'), true);
 
   for (const path of [
     'app/(tabs)/program/build.ios.tsx',

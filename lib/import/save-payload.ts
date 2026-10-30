@@ -13,6 +13,7 @@ export type SaveImportedProgramExercise = {
   min_reps: number;
   max_reps: number;
   notes: string | null;
+  rest_seconds?: number;
 };
 
 export type SaveImportedProgramDay = {
@@ -21,7 +22,7 @@ export type SaveImportedProgramDay = {
   exercises: SaveImportedProgramExercise[];
 };
 
-/** Keys allowed by save_imported_program. user id, order, slug, and rest stay out. */
+/** Keys allowed by save_imported_program. user id, order, and slug stay out. rest_seconds is present only when the save plan kept a rest value. */
 export type SaveImportedProgramPayload = {
   name: string;
   days: SaveImportedProgramDay[];
@@ -71,13 +72,17 @@ export function toSavePayload(
       if (exerciseId == null) {
         return { ok: false, errors: [IMPORT_INVALID_EXERCISE_ID_MESSAGE] };
       }
-      exercises.push({
+      const row: SaveImportedProgramExercise = {
         exercise_id: exerciseId,
         target_sets: exercise.target_sets,
         min_reps: exercise.min_reps,
         max_reps: exercise.max_reps,
         notes: exercise.notes,
-      });
+      };
+      if (typeof exercise.rest_seconds === 'number') {
+        row.rest_seconds = exercise.rest_seconds;
+      }
+      exercises.push(row);
     }
     days.push({
       name: day.name,

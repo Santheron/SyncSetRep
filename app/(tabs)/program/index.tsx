@@ -91,6 +91,19 @@ export default function ProgramScreen() {
           )}
         </Pressable>
       </Link>
+      <Link href="/program/import" asChild>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Import a workout"
+          android_ripple={{ color: 'rgba(255, 255, 255, 0.12)' }}
+          style={styles.secondarySavedButton}>
+          {({ pressed }) => (
+            <Text style={[styles.secondarySavedLabel, pressed && styles.pressed]}>
+              Import a workout
+            </Text>
+          )}
+        </Pressable>
+      </Link>
 
       {isLoading ? (
         <Text style={styles.status}>Loading program days...</Text>

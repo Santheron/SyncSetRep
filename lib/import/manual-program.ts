@@ -36,13 +36,15 @@ import {
   type ImportSaveRpc,
   type SaveImportedProgramResult,
 } from './save-imported-program.ts';
-import { IMPORT_CAPACITY_MESSAGE } from './save-plan.ts';
+import { IMPORT_BLANK_SUBTITLE_MESSAGE, IMPORT_CAPACITY_MESSAGE } from './save-plan.ts';
 import { toSavePayload, type SaveImportedProgramPayload } from './save-payload.ts';
 import { isLoadMode, type LoadMode } from '../load-mode.ts';
 import {
+  CUSTOM_EXERCISE_WRITES_ENABLED,
   normalizeExerciseName,
   type PlannedExercise,
 } from './planned-exercises.ts';
+import { SUBTITLE_REQUIRED } from './flags.ts';
 
 // Manual routines use the same review state as an import preview.
 // They do not call a model or consume an import quota.
@@ -69,6 +71,11 @@ export const EDIT_DRAFT_NOTICE =
 
 export const EDIT_SAVE_BLOCKED_MESSAGE =
   'Saving edits stays off in this build. Nothing was changed.';
+
+export const EDIT_SAVED_MESSAGE = 'Saved. Workout history was not changed.';
+
+export const CUSTOM_EXERCISE_SAVE_BLOCKED_MESSAGE =
+  'Saving a custom exercise stays off in this build. Nothing was saved.';
 
 export const EDIT_DAY_LABEL = 'Edit day';
 
@@ -584,7 +591,9 @@ export function routineUsesStoredExerciseIds(review: ProgramReview): boolean {
 
 export function validateManualRoutine(
   review: ProgramReview,
+  options?: { subtitleRequired?: boolean },
 ): { ok: true } | { ok: false; errors: string[] } {
+  const subtitleRequired = options?.subtitleRequired ?? SUBTITLE_REQUIRED;
   const errors: string[] = [];
   const programName = typeof review.programName === 'string' ? review.programName.trim() : '';
   if (programName.length < 1 || programName.length > PROGRAM_NAME_MAX) {
@@ -606,6 +615,9 @@ export function validateManualRoutine(
       pushMessage(errors, MANUAL_DAY_NAME_SAVE_MESSAGE);
     }
     const subtitle = typeof day.subtitle === 'string' ? day.subtitle.trim() : '';
+    if (subtitleRequired && subtitle.length === 0) {
+      pushMessage(errors, IMPORT_BLANK_SUBTITLE_MESSAGE);
+    }
     if (subtitle.length > TEXT_FIELD_MAX) {
       pushMessage(errors, MANUAL_SUBTITLE_SAVE_MESSAGE);
     }
@@ -700,15 +712,177 @@ function ownedSaveError(message: string | null | undefined): string {
 export function previewProgramEdit(
   review: ProgramReview,
   userId: string,
+  options?: { subtitleRequired?: boolean },
 ): { ok: false; errors: string[] } {
   if (userId.trim() === '') {
     return { ok: false, errors: [MANUAL_SIGN_IN_SAVE_MESSAGE] };
   }
-  const valid = validateManualRoutine(review);
+  const valid = validateManualRoutine(review, options);
   if (!valid.ok) {
     return valid;
   }
   return { ok: false, errors: [EDIT_SAVE_BLOCKED_MESSAGE] };
+}
+
+export type OwnedProgramUpdateExercise = {
+  exercise_id?: string;
+  custom_name?: string;
+  target_sets: number;
+  min_reps: number;
+  max_reps: number;
+  notes: string | null;
+  load_mode?: LoadMode;
+};
+
+export type OwnedProgramUpdateDay = {
+  day_id?: string;
+  name: string;
+  subtitle: string | null;
+  exercises: OwnedProgramUpdateExercise[];
+};
+
+export type OwnedProgramUpdatePayload = {
+  program_id: string;
+  name: string;
+  days: OwnedProgramUpdateDay[];
+};
+
+export type OwnedProgramEditRpc = (args: {
+  p_program: OwnedProgramUpdatePayload;
+}) => Promise<{ data: unknown; error: { message?: string | null } | null }>;
+
+function emptyToNull(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+export function ownedProgramUpdatePayload(
+  review: ProgramReview,
+  programId: string,
+  options?: { subtitleRequired?: boolean; allowCustomExercises?: boolean },
+): { ok: true; payload: OwnedProgramUpdatePayload } | { ok: false; errors: string[] } {
+  const valid = validateManualRoutine(review, options);
+  if (!valid.ok) {
+    return valid;
+  }
+  const programText = storedExerciseId(programId);
+  if (programText == null) {
+    return { ok: false, errors: ['Choose a saved routine. Nothing was changed.'] };
+  }
+  const allowCustom = options?.allowCustomExercises ?? CUSTOM_EXERCISE_WRITES_ENABLED;
+  if (!allowCustom && !routineUsesStoredExerciseIds(review)) {
+    return { ok: false, errors: [CUSTOM_EXERCISE_SAVE_BLOCKED_MESSAGE] };
+  }
+
+  const days: OwnedProgramUpdateDay[] = [];
+  for (const day of review.days) {
+    const exercises: OwnedProgramUpdateExercise[] = [];
+    for (const exercise of day.exercises) {
+      const sets = acceptedManualInt(exercise.sets, SETS_MIN, SETS_MAX);
+      const repsMin = acceptedManualInt(exercise.repsMin, REPS_MIN, REPS_MAX);
+      const repsMax = acceptedManualInt(exercise.repsMax, REPS_MIN, REPS_MAX);
+      if (sets == null || repsMin == null || repsMax == null) {
+        return { ok: false, errors: [MANUAL_SETS_SAVE_MESSAGE] };
+      }
+      const storedId = storedExerciseId(exercise.exerciseId);
+      const named = customExerciseName(exercise.sourceName);
+      const row: OwnedProgramUpdateExercise = {
+        target_sets: sets,
+        min_reps: repsMin,
+        max_reps: repsMax,
+        notes: emptyToNull(exercise.notes),
+      };
+      if (storedId != null) {
+        row.exercise_id = storedId;
+      } else if (named != null) {
+        row.custom_name = named;
+      } else {
+        return { ok: false, errors: [MANUAL_CHOOSE_EXERCISE_MESSAGE] };
+      }
+      if (isLoadMode(exercise.loadMode)) {
+        row.load_mode = exercise.loadMode;
+      }
+      exercises.push(row);
+    }
+    const dayId = storedExerciseId(day.storedDayId);
+    const nextDay: OwnedProgramUpdateDay = {
+      name: day.name.trim(),
+      subtitle: emptyToNull(day.subtitle),
+      exercises,
+    };
+    if (dayId != null) {
+      nextDay.day_id = dayId;
+    }
+    days.push(nextDay);
+  }
+
+  return {
+    ok: true,
+    payload: {
+      program_id: programText,
+      name: review.programName.trim(),
+      days,
+    },
+  };
+}
+
+function editSaveError(message: string | null | undefined): string {
+  const text = message ?? '';
+  if (text.includes('Not authenticated')) {
+    return MANUAL_SIGN_IN_SAVE_MESSAGE;
+  }
+  if (text.includes('archived_day_locked')) {
+    return 'That day is archived. Nothing was changed.';
+  }
+  if (text.includes('program_day_not_found') || text.includes('program_not_found')) {
+    return 'That routine is not available to edit. Nothing was changed.';
+  }
+  if (text.includes('use_catalog_exercise')) {
+    return 'Choose the matching library exercise. Nothing was changed.';
+  }
+  if (text.includes('exercise_name_taken')) {
+    return 'That exercise name is already in use. Nothing was changed.';
+  }
+  return 'Could not save these edits. Nothing was changed.';
+}
+
+export async function saveOwnedProgramEdit(
+  review: ProgramReview,
+  options: {
+    userId: string;
+    programId: string;
+    rpc?: OwnedProgramEditRpc;
+    subtitleRequired?: boolean;
+    allowCustomExercises?: boolean;
+  },
+): Promise<SaveImportedProgramResult> {
+  if (typeof options.userId !== 'string' || options.userId.trim() === '') {
+    return { ok: false, errors: [MANUAL_SIGN_IN_SAVE_MESSAGE] };
+  }
+  const payload = ownedProgramUpdatePayload(review, options.programId, options);
+  if (!payload.ok) {
+    return payload;
+  }
+  if (!options.rpc) {
+    return { ok: false, errors: [EDIT_SAVE_BLOCKED_MESSAGE] };
+  }
+  let response: { data: unknown; error: { message?: string | null } | null };
+  try {
+    response = await options.rpc({ p_program: payload.payload });
+  } catch {
+    return { ok: false, errors: ['Could not save these edits. Nothing was changed.'] };
+  }
+  if (response.error) {
+    return { ok: false, errors: [editSaveError(response.error.message)] };
+  }
+  const programId = ownedProgramId(response.data);
+  if (programId == null) {
+    return { ok: false, errors: ['Could not save these edits. Nothing was changed.'] };
+  }
+  return { ok: true, programId };
 }
 
 export async function saveManualProgram(
@@ -718,12 +892,14 @@ export async function saveManualProgram(
     programs: readonly SavedProgramSummary[];
     rpc?: ImportSaveRpc;
     ownedRpc?: OwnedProgramSaveRpc;
+    subtitleRequired?: boolean;
+    persistRestSeconds?: boolean;
   },
 ): Promise<SaveImportedProgramResult> {
   if (typeof options.userId !== 'string' || options.userId.trim() === '') {
     return { ok: false, errors: [MANUAL_SIGN_IN_SAVE_MESSAGE] };
   }
-  const valid = validateManualRoutine(review);
+  const valid = validateManualRoutine(review, options);
   if (!valid.ok) {
     return valid;
   }
@@ -734,6 +910,8 @@ export async function saveManualProgram(
     }
     const payload = toSavePayload(previewForStoredSave(review), options.userId, {
       hasActiveProgram: true,
+      subtitleRequired: options.subtitleRequired,
+      persistRestSeconds: options.persistRestSeconds,
     });
     if (!payload.ok) {
       return payload;
@@ -763,5 +941,7 @@ export async function saveManualProgram(
     userId: options.userId,
     hasActiveProgram: true,
     rpc: options.rpc,
+    subtitleRequired: options.subtitleRequired,
+    persistRestSeconds: options.persistRestSeconds,
   });
 }

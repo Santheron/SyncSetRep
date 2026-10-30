@@ -129,7 +129,7 @@ try {
   assert.equal(importedPayload.payload.days[1]?.exercises[0]?.notes, 'Pause');
   assert.equal(importedPayload.payload.days[1]?.exercises[0]?.min_reps, 8);
   assert.equal(importedPayload.payload.days[1]?.exercises[0]?.max_reps, 12);
-  assert.equal(JSON.stringify(importedPayload.payload).includes('"rest_seconds"'), false);
+  assert.equal(importedPayload.payload.days[1]?.exercises[0]?.rest_seconds, 90);
   assert.equal(JSON.stringify(importedPayload.payload).includes('"suggestion"'), false);
 
   let capped = createManualProgramReview();

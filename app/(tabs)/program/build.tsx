@@ -10,13 +10,14 @@ import {
   loadOwnedPrograms,
   loadProgramDraftForCurrentUser,
   saveManualProgramForCurrentUser,
+  saveOwnedProgramEditForCurrentUser,
 } from '@/lib/import/manual-program-client';
 import {
   hasCurrentProgram,
-  previewProgramEdit,
   type CatalogExercise,
   type SavedProgramSummary,
 } from '@/lib/import/manual-program';
+import { createCustomExercise } from '@/lib/import/custom-exercise';
 import {
   DRAFT_LOADING_MESSAGE,
   reviewFromProgramDraft,
@@ -52,6 +53,7 @@ export default function BuildRoutineScreen() {
   const [programsLoaded, setProgramsLoaded] = useState(false);
   const [draftReady, setDraftReady] = useState(false);
   const [draftUserId, setDraftUserId] = useState<string | null>(null);
+  const [draftProgramId, setDraftProgramId] = useState<string | null>(null);
   const [focusDayIndex, setFocusDayIndex] = useState<number | null>(null);
 
   useFocusEffect(
@@ -85,6 +87,7 @@ export default function BuildRoutineScreen() {
           if (loadedDraftKey.current != null) {
             setReview(createManualProgramReview());
             setDraftUserId(null);
+            setDraftProgramId(null);
             setFocusDayIndex(null);
             loadedDraftKey.current = null;
           }
@@ -94,9 +97,11 @@ export default function BuildRoutineScreen() {
             setLoadError(draftResult.error);
             setDraftReady(false);
             setDraftUserId(null);
+            setDraftProgramId(null);
           } else {
             setReview(reviewFromProgramDraft(draftResult.draft));
             setDraftUserId(draftResult.userId);
+            setDraftProgramId(draftResult.draft.programId);
             setFocusDayIndex(draftResult.focusDayIndex);
             setDraftReady(true);
             setSaveErrors([]);
@@ -116,14 +121,32 @@ export default function BuildRoutineScreen() {
 
   function save() {
     if (editingRequested) {
-      if (!draftReady || !draftUserId) {
-        setSaveErrors([DRAFT_LOADING_MESSAGE]);
-        return;
-      }
-      setSaveErrors(previewProgramEdit(review, draftUserId).errors);
+      void saveEditedRoutine();
       return;
     }
     void saveNewRoutine();
+  }
+
+  async function saveEditedRoutine() {
+    if (saveLock.current || isSaving) {
+      return;
+    }
+    if (!draftReady || !draftUserId || !draftProgramId) {
+      setSaveErrors([DRAFT_LOADING_MESSAGE]);
+      return;
+    }
+    saveLock.current = true;
+    setIsSaving(true);
+    setSaveErrors([]);
+    const result = await saveOwnedProgramEditForCurrentUser(review, { programId: draftProgramId });
+    if (!result.ok) {
+      saveLock.current = false;
+      setSaveErrors(result.errors);
+    } else {
+      setSaveErrors([]);
+      setSavedProgramId(result.programId);
+    }
+    setIsSaving(false);
   }
 
   async function saveNewRoutine() {
@@ -164,9 +187,18 @@ export default function BuildRoutineScreen() {
         isSaving={isSaving}
         onChange={setReview}
         onSave={save}
+        onSaveCustomExercise={(name) => {
+          void createCustomExercise(name).then((result) => {
+            if (!result.ok) {
+              setSaveErrors([result.error]);
+              return;
+            }
+            setSaveErrors([]);
+          });
+        }}
         review={review}
         saveErrors={loadError ? [loadError, ...saveErrors] : saveErrors}
-        savedProgramId={editingRequested ? null : savedProgramId}
+        savedProgramId={savedProgramId}
       />
     </KeyboardAvoidingView>
   );

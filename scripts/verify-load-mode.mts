@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url';
 import {
   ACTIVATION_RPC_ENABLED,
   MANUAL_SAVE_RPC_ENABLED,
+  OWNED_PROGRAM_EDIT_ENABLED,
   OWNED_PROGRAM_RPC_ENABLED,
 } from '../lib/import/manual-program-client.ts';
+import { historySetTracking, historyTrackingColumnMissing } from '../lib/history-sets.ts';
 import { applyManualEdit, validateManualRoutine } from '../lib/import/manual-program.ts';
 import { CUSTOM_EXERCISE_WRITES_ENABLED } from '../lib/import/planned-exercises.ts';
 import { createManualProgramReview, toImportPreview } from '../lib/import/review-editor.ts';
@@ -42,6 +44,7 @@ assert.equal(ACTIVATION_RPC_ENABLED, false);
 assert.equal(MANUAL_SAVE_RPC_ENABLED, false);
 assert.equal(OWNED_PROGRAM_RPC_ENABLED, false);
 assert.equal(CUSTOM_EXERCISE_WRITES_ENABLED, false);
+assert.equal(OWNED_PROGRAM_EDIT_ENABLED, false);
 
 assert.equal(formatLegacyLoad(null), 'BW');
 assert.equal(formatLegacyLoad(''), 'BW');
@@ -93,6 +96,32 @@ assert.equal(formatHistorySetLine({ weight: 0, reps: 8 }), '8 reps');
 assert.equal(formatHistorySetLine({ weight: '', reps: 8 }), '8 reps');
 assert.equal(formatHistorySetLine({ weight: 135, reps: 5 }).includes('Assisted'), false);
 assert.equal(formatHistorySetLine({ weight: 135, reps: 5 }).includes('BW +'), false);
+const legacyHistory = historySetTracking({
+  load_mode: null,
+  assistance: null,
+  weight_unit: null,
+});
+assert.equal(
+  formatHistorySetLine({ weight: null, reps: 8, ...legacyHistory }),
+  '8 reps',
+);
+const assistedHistory = historySetTracking({
+  load_mode: 'assisted',
+  assistance: '20',
+  weight_unit: 'lb',
+});
+assert.equal(
+  formatHistorySetLine({ weight: null, reps: 5, ...assistedHistory }),
+  `Assisted 20 lb ${times} 5`,
+);
+assert.equal(
+  historyTrackingColumnMissing({ code: 'PGRST204', message: 'Could not find load_mode' }),
+  true,
+);
+assert.equal(
+  historyTrackingColumnMissing({ code: '42501', message: 'permission denied for load_mode' }),
+  false,
+);
 assert.equal(
   formatHistorySetLine({ weight: 10, reps: 5, loadMode: 'added', weightUnit: 'kg' }),
   `BW + 10 kg ${times} 5`,
@@ -270,9 +299,13 @@ assert.equal(logger.includes('TRACKING_MODE_LABELS'), true);
 assert.equal(logger.includes('formatTrackedLoad'), true);
 assert.equal(logger.includes('Number(values.weight) || 0'), false);
 assert.equal(history.includes('formatHistorySetLine'), true);
-assert.equal(history.includes('load_mode'), false);
-assert.equal(history.includes('weight_unit'), false);
+assert.equal(history.includes('historySetTracking'), true);
+assert.equal(history.includes('historyTrackingColumnMissing'), true);
+assert.equal(history.includes('HISTORY_SET_SELECT_LEGACY'), true);
+assert.equal(history.includes('loadMode: set.loadMode'), true);
 assert.equal(history.includes('archived_at'), false);
+assert.equal(source('lib/history-sets.ts').includes('load_mode'), true);
+assert.equal(source('lib/history-sets.ts').includes('weight_unit'), true);
 const historyIndex = source('app/(tabs)/history/index.tsx');
 assert.equal(historyIndex.includes('archived_at'), false);
 assert.equal(session.includes('prepareTrackedWrite'), true);
@@ -326,9 +359,21 @@ const phonePaths = [
 for (const path of phonePaths) {
   const text = source(path);
   for (const name of bannedCalls) {
+    if (path === 'lib/import/manual-program-client.ts' && name === 'update_owned_program') {
+      continue;
+    }
     assert.equal(text.includes(name), false, `${path} mentions ${name}`);
   }
 }
+const editClient = source('lib/import/manual-program-client.ts');
+assert.equal(editClient.includes('OWNED_PROGRAM_EDIT_ENABLED = false'), true);
+assert.equal(
+  editClient.includes('io?.rpc ?? (OWNED_PROGRAM_EDIT_ENABLED ? defaultEditRpc : undefined)'),
+  true,
+);
+assert.equal(source('app/(tabs)/program/build.tsx').includes('update_owned_program'), false);
+assert.equal(source('lib/import/custom-exercise.ts').includes("rpc('create_custom_exercise'"), true);
+assert.equal(source('components/manual-program-builder.tsx').includes('create_custom_exercise'), false);
 
 const sqlFiles = [
   'sql/load-mode.sql',

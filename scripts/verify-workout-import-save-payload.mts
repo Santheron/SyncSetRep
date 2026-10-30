@@ -153,8 +153,9 @@ try {
   const withRest = payloadOf(
     toSavePayload(preview(), USER_ID, { hasActiveProgram: true, persistRestSeconds: true }),
   );
-  assert.equal(JSON.stringify(withRest).includes('"rest_seconds"'), false);
-  assert.deepEqual(withRest, payload);
+  assert.equal(withRest.days[1]?.exercises[0]?.rest_seconds, 90);
+  assert.equal(withRest.days[1]?.exercises[1]?.rest_seconds, 90);
+  assert.equal(JSON.stringify(payload).includes('"rest_seconds"'), false);
 
   const invalidIds: Array<{ id: ImportPreviewExercise['exerciseId']; message: string }> = [
     { id: 0, message: IMPORT_INVALID_EXERCISE_ID_MESSAGE },

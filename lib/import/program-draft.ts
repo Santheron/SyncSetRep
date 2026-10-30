@@ -99,6 +99,7 @@ export function reviewFromProgramDraft(draft: ProgramDraft): ProgramReview {
     days: draft.days.map((day) => ({
       name: day.name,
       subtitle: day.subtitle,
+      storedDayId: day.id,
       exercises: day.exercises.map((exercise) => ({
         source: 'manual' as const,
         sourceName: exercise.name,
