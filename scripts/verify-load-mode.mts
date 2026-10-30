@@ -358,6 +358,16 @@ assert.match(source('sql/routine-write-step-precheck.sql'), /routine_write_step_
 assert.match(source('sql/routine-write-baseline.sql'), /routine_write_baseline_ready/);
 assert.match(source('sql/routine-write-deployment.md'), /Failure-recovery matrix/);
 assert.match(source('sql/routine-write-deployment.md'), /Do not execute the functions/);
+assert.match(source('sql/routine-write-deployment.md'), /## Maintenance window/);
+assert.match(source('sql/routine-write-deployment.md'), /## Backup verification/);
+assert.match(source('sql/routine-write-deployment.md'), /## Unexpected counts and fingerprints/);
+assert.match(source('sql/routine-write-deployment.md'), /pg_restore --list/);
+assert.match(source('sql/routine-write-deployment.md'), /syncsetrep_restore_test/);
+assert.match(source('sql/routine-write-deployment.md'), /127\.0\.0\.1/);
+assert.equal(
+  /pg_restore --clean` against it/.test(source('sql/routine-write-deployment.md')),
+  true,
+);
 assert.equal(
   /SELECT\s+public\.record_tracked_set\s*\(/i.test(source('sql/routine-write-deployment.md')),
   false,

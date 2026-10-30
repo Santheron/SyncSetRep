@@ -332,6 +332,10 @@ async function main() {
   assert.match(deploymentText, /routine_write_baseline_ready/);
   assert.match(deploymentText, /has_function_privilege/);
   assert.match(deploymentText, /Do not execute the functions/);
+  assert.match(deploymentText, /## Maintenance window/);
+  assert.match(deploymentText, /pg_restore --list/);
+  assert.match(deploymentText, /syncsetrep_restore_test/);
+  assert.match(deploymentText, /## Unexpected counts and fingerprints/);
   assert.equal(
     /SELECT\s+public\.(record_tracked_set|create_custom_exercise|update_owned_program|save_manual_program)\s*\(/i.test(deploymentText),
     false,
