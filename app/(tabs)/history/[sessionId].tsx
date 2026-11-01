@@ -9,10 +9,11 @@ import { supabase } from '@/lib/supabase';
 import {
   HISTORY_SET_SELECT_LEGACY,
   HISTORY_SET_SELECT_TRACKED,
+  historySetDisplayLine,
   historySetTracking,
   historyTrackingColumnMissing,
 } from '@/lib/history-sets';
-import { formatHistorySetLine, type LoadMode, type WeightUnit } from '@/lib/load-mode';
+import { type LoadMode, type WeightUnit } from '@/lib/load-mode';
 import {
   formatWorkoutDate,
   formatWorkoutDuration,
@@ -293,15 +294,7 @@ export default function HistoryDetailScreen() {
               {exercise.sets.map((set) => (
                 <View key={set.id} style={styles.setBlock}>
                   <Text style={styles.setHeading}>Set {set.setNumber}</Text>
-                  <Text style={styles.setLine}>
-                    {formatHistorySetLine({
-                      weight: set.weight,
-                      reps: set.reps,
-                      loadMode: set.loadMode,
-                      assistance: set.assistance,
-                      weightUnit: set.weightUnit,
-                    })}
-                  </Text>
+                  <Text style={styles.setLine}>{historySetDisplayLine(set)}</Text>
                   {set.rir !== null ? <Text style={styles.setRir}>RIR {set.rir}</Text> : null}
                 </View>
               ))}

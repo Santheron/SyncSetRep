@@ -31,7 +31,7 @@ function draftText(payload: {
   return null;
 }
 
-Deno.serve(async (request: Request) => {
+export async function handleImportWorkout(request: Request): Promise<Response> {
   if (request.method !== 'POST') {
     return json({ error: 'method_not_allowed' }, 405);
   }
@@ -71,4 +71,8 @@ Deno.serve(async (request: Request) => {
   } catch {
     return json({ error: 'import_failed' }, 502);
   }
-});
+}
+
+if (Deno.env.get('IMPORT_WORKOUT_NO_SERVE') !== '1') {
+  Deno.serve(handleImportWorkout);
+}

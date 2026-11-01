@@ -1,4 +1,9 @@
-import { isLoadMode, type LoadMode, type WeightUnit } from './load-mode.ts';
+import {
+  formatHistorySetLine,
+  isLoadMode,
+  type LoadMode,
+  type WeightUnit,
+} from './load-mode.ts';
 import { isMissingColumnError } from './postgrest.ts';
 
 // History reads tracking columns when they exist. A database that predates
@@ -77,4 +82,20 @@ export function historySetTracking(row: {
     assistance: finiteNumber(row.assistance),
     weightUnit: unit,
   };
+}
+
+export function historySetDisplayLine(set: {
+  weight: number | string | null;
+  reps: number | null;
+  loadMode?: LoadMode | null;
+  assistance?: number | null;
+  weightUnit?: WeightUnit | null;
+}): string {
+  return formatHistorySetLine({
+    weight: set.weight,
+    reps: set.reps,
+    loadMode: set.loadMode ?? null,
+    assistance: set.assistance ?? null,
+    weightUnit: set.weightUnit ?? null,
+  });
 }
