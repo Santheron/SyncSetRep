@@ -1,0 +1,21 @@
+{
+  "programName": { "origin": "extracted", "value": "Upper Lower" },
+  "days": [
+    {
+      "name": { "origin": "extracted", "value": "Lower" },
+      "subtitle": { "origin": "missing", "value": null },
+      "exercises": [
+        {
+          "sourceName": "Squat",
+          "sets": { "origin": "missing", "value": null, "suggestion": 4 },
+          "repsMin": { "origin": "missing", "value": null, "suggestion": null },
+          "repsMax": { "origin": "missing", "value": null, "suggestion": null },
+          "restSeconds": { "origin": "missing", "value": null, "suggestion": 90 },
+          "weight": { "origin": "missing", "value": null, "suggestion": null },
+          "notes": { "origin": "missing", "value": null }
+        }
+      ]
+    }
+  ],
+  "warnings": []
+}

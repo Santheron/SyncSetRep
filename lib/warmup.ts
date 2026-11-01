@@ -1,7 +1,7 @@
 import {
   calculatePlates,
   DEFAULT_BAR_WEIGHT_LB,
-} from '@/lib/plate-calculator';
+} from './plate-calculator.ts';
 
 export type EquipmentType =
   | 'barbell'

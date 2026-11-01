@@ -7,7 +7,14 @@ import { Colors } from '@/constants/theme';
 import { getAuthenticatedUserId } from '@/lib/current-user';
 import { supabase } from '@/lib/supabase';
 import {
-  formatSetLoad,
+  HISTORY_SET_SELECT_LEGACY,
+  HISTORY_SET_SELECT_TRACKED,
+  historySetDisplayLine,
+  historySetTracking,
+  historyTrackingColumnMissing,
+} from '@/lib/history-sets';
+import { type LoadMode, type WeightUnit } from '@/lib/load-mode';
+import {
   formatWorkoutDate,
   formatWorkoutDuration,
   unwrapRelation,
@@ -33,6 +40,9 @@ type WorkoutSetRow = {
   reps: number | null;
   rir: number | null;
   is_completed: boolean | null;
+  load_mode?: string | null;
+  assistance?: number | string | null;
+  weight_unit?: string | null;
   exercise: ExerciseRef | ExerciseRef[] | null;
 };
 
@@ -47,6 +57,9 @@ type HistorySet = {
   weight: number | null;
   reps: number | null;
   rir: number | null;
+  loadMode: LoadMode | null;
+  assistance: number | null;
+  weightUnit: WeightUnit | null;
 };
 
 type ExerciseGroup = {
@@ -73,12 +86,16 @@ function groupSets(
     const exercise = unwrapRelation(row.exercise);
     const existing = groups.get(row.exercise_id);
 
+    const tracking = historySetTracking(row);
     const nextSet: HistorySet = {
       id: row.id,
       setNumber: row.set_number,
       weight: row.weight,
       reps: row.reps,
       rir: row.rir,
+      loadMode: tracking.loadMode,
+      assistance: tracking.assistance,
+      weightUnit: tracking.weightUnit,
     };
 
     if (existing) {
@@ -176,28 +193,23 @@ export default function HistoryDetailScreen() {
         return;
       }
 
+      const trackedSets = await supabase
+        .from('workout_sets')
+        .select(HISTORY_SET_SELECT_TRACKED)
+        .eq('workout_session_id', sessionId)
+        .eq('is_completed', true)
+        .order('set_number', { ascending: true });
+      const setsQuery =
+        trackedSets.error && historyTrackingColumnMissing(trackedSets.error)
+          ? supabase
+              .from('workout_sets')
+              .select(HISTORY_SET_SELECT_LEGACY)
+              .eq('workout_session_id', sessionId)
+              .eq('is_completed', true)
+              .order('set_number', { ascending: true })
+          : Promise.resolve(trackedSets);
       const [setsResult, orderResult] = await Promise.all([
-        supabase
-          .from('workout_sets')
-          .select(
-            `
-            id,
-            exercise_id,
-            set_number,
-            weight,
-            reps,
-            rir,
-            is_completed,
-            exercise:exercises (
-              id,
-              name,
-              equipment_type
-            )
-          `,
-          )
-          .eq('workout_session_id', sessionId)
-          .eq('is_completed', true)
-          .order('set_number', { ascending: true }),
+        setsQuery,
         supabase
           .from('program_exercises')
           .select('exercise_id, exercise_order')
@@ -282,11 +294,7 @@ export default function HistoryDetailScreen() {
               {exercise.sets.map((set) => (
                 <View key={set.id} style={styles.setBlock}>
                   <Text style={styles.setHeading}>Set {set.setNumber}</Text>
-                  <Text style={styles.setLine}>
-                    {set.weight !== null && Number(set.weight) > 0
-                      ? `${formatSetLoad(set.weight)} × ${set.reps ?? 0}`
-                      : `${set.reps ?? 0} reps`}
-                  </Text>
+                  <Text style={styles.setLine}>{historySetDisplayLine(set)}</Text>
                   {set.rir !== null ? <Text style={styles.setRir}>RIR {set.rir}</Text> : null}
                 </View>
               ))}

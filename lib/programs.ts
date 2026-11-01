@@ -1,15 +1,27 @@
+import {
+  decideActiveProgram,
+  NO_ACTIVE_PROGRAM_CODE,
+  NO_ACTIVE_PROGRAM_MESSAGE,
+  type NoActiveProgramCode,
+} from '@/lib/active-program';
 import { getAuthenticatedUserId } from '@/lib/current-user';
+import { isActiveProgramDay } from '@/lib/load-mode';
+import { isMissingColumnError } from '@/lib/postgrest';
 import { logOwnedDataError } from '@/lib/rls-error';
 import { supabase } from '@/lib/supabase';
 
-type Result<T> = { ok: true; data: T } | { ok: false; error: string };
+export const ARCHIVED_DAY_MESSAGE = 'That workout day is no longer in your active routine.';
+
+export type ProgramLoadResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; code?: NoActiveProgramCode };
 
 function formatError(error: { message?: string | null } | null, fallback: string): string {
   const message = error?.message?.trim();
   return message ? message : fallback;
 }
 
-export async function ensureOwnProgram(): Promise<Result<string>> {
+export async function loadActiveProgram(): Promise<ProgramLoadResult<string>> {
   const userResult = await getAuthenticatedUserId();
 
   if (!userResult.ok) {
@@ -25,62 +37,72 @@ export async function ensureOwnProgram(): Promise<Result<string>> {
     .limit(1)
     .maybeSingle();
 
-  if (!existingActive.error && existingActive.data?.id != null) {
-    return { ok: true, data: String(existingActive.data.id) };
+  const decision = decideActiveProgram({
+    signedIn: true,
+    queryFailed: existingActive.error != null,
+    activeId: existingActive.data?.id != null ? String(existingActive.data.id) : null,
+  });
+
+  if (decision.action === 'use') {
+    return { ok: true, data: decision.programId };
   }
 
-  const existingAny = await supabase
-    .from('programs')
-    .select('id')
-    .eq('user_id', userResult.data)
-    .order('id', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (!existingAny.error && existingAny.data?.id != null) {
-    return { ok: true, data: String(existingAny.data.id) };
-  }
-
-  const { data, error } = await supabase.rpc('copy_starter_program_for_current_user');
-
-  if (error || data == null) {
+  if (decision.code === 'query-error') {
     logOwnedDataError({
       table: 'programs',
-      operation: 'rpc',
+      operation: 'select',
       userId: userResult.data,
-      error: error ?? { message: 'copy_starter_program_for_current_user returned no id' },
+      error: existingActive.error ?? { message: 'Could not load your current program.' },
     });
     return {
       ok: false,
-      error: formatError(error, 'Could not create your program.'),
+      error: formatError(existingActive.error, 'Could not load your current program.'),
     };
   }
 
-  return { ok: true, data: String(data) };
+  return {
+    ok: false,
+    error: NO_ACTIVE_PROGRAM_MESSAGE,
+    code: NO_ACTIVE_PROGRAM_CODE,
+  };
 }
 
 export async function assertOwnProgramDay(
   programDayId: string,
-): Promise<Result<{ programId: string }>> {
-  const programResult = await ensureOwnProgram();
+): Promise<ProgramLoadResult<{ programId: string }>> {
+  const programResult = await loadActiveProgram();
 
   if (!programResult.ok) {
     return programResult;
   }
 
-  const { data, error } = await supabase
+  const withArchive = await supabase
     .from('program_days')
-    .select('id')
+    .select('id, archived_at')
     .eq('id', programDayId)
     .eq('program_id', programResult.data)
     .maybeSingle();
+  const selected =
+    withArchive.error && isMissingColumnError(withArchive.error, 'archived_at')
+      ? await supabase
+          .from('program_days')
+          .select('id')
+          .eq('id', programDayId)
+          .eq('program_id', programResult.data)
+          .maybeSingle()
+      : withArchive;
 
-  if (error) {
-    return { ok: false, error: error.message };
+  if (selected.error) {
+    return { ok: false, error: selected.error.message };
   }
 
-  if (!data) {
+  if (!selected.data) {
     return { ok: false, error: 'That workout day is not in your program.' };
+  }
+
+  const archivedAt = (selected.data as { archived_at?: string | null }).archived_at;
+  if (!isActiveProgramDay(archivedAt)) {
+    return { ok: false, error: ARCHIVED_DAY_MESSAGE };
   }
 
   return { ok: true, data: { programId: programResult.data } };

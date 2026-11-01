@@ -1,13 +1,18 @@
 import { useCallback, useState } from 'react';
-import { StyleSheet, Text } from 'react-native';
-import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { Pressable, StyleSheet, Text } from 'react-native';
+import { Link, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
-import { ensureOwnProgram } from '@/lib/programs';
+import { EDIT_DAY_LABEL } from '@/lib/import/manual-program';
+import { isActiveProgramDay } from '@/lib/load-mode';
+import { isMissingColumnError } from '@/lib/postgrest';
+import { ARCHIVED_DAY_MESSAGE, loadActiveProgram } from '@/lib/programs';
 import { supabase } from '@/lib/supabase';
+import { buttonPaletteForSurface } from '@/lib/ui/button-contrast';
 
 const palette = Colors.dark;
+const primaryButton = buttonPaletteForSurface('dark');
 
 type ProgramDay = {
   id: string;
@@ -70,7 +75,7 @@ export default function ProgramDayScreen() {
     let isMounted = true;
 
     async function loadProgramDay() {
-      const programResult = await ensureOwnProgram();
+      const programResult = await loadActiveProgram();
 
       if (!isMounted) {
         return;
@@ -84,13 +89,23 @@ export default function ProgramDayScreen() {
         return;
       }
 
+      const dayWithArchive = await supabase
+        .from('program_days')
+        .select('id, name, subtitle, archived_at')
+        .eq('id', programDayId)
+        .eq('program_id', programResult.data)
+        .maybeSingle();
+      const dayQuery =
+        dayWithArchive.error && isMissingColumnError(dayWithArchive.error, 'archived_at')
+          ? supabase
+              .from('program_days')
+              .select('id, name, subtitle')
+              .eq('id', programDayId)
+              .eq('program_id', programResult.data)
+              .maybeSingle()
+          : Promise.resolve(dayWithArchive);
       const [dayResult, exercisesResult] = await Promise.all([
-        supabase
-          .from('program_days')
-          .select('id, name, subtitle')
-          .eq('id', programDayId)
-          .eq('program_id', programResult.data)
-          .single(),
+        dayQuery,
         supabase
           .from('program_exercises')
           .select(
@@ -158,6 +173,15 @@ export default function ProgramDayScreen() {
         return;
       }
 
+      const archivedAt = (dayResult.data as { archived_at?: string | null } | null)?.archived_at;
+      if (dayResult.data && !isActiveProgramDay(archivedAt)) {
+        setErrorMessage(ARCHIVED_DAY_MESSAGE);
+        setProgramDay(null);
+        setExercises([]);
+        setIsLoading(false);
+        return;
+      }
+
       const rows = (exercisesResult.data ?? []) as ProgramExerciseRow[];
 
       setErrorMessage(null);
@@ -195,6 +219,22 @@ export default function ProgramDayScreen() {
             ? 'Could not load workout day'
             : programDay?.subtitle}
       </Text>
+
+      {!isLoading && !errorMessage && programDay ? (
+        <Link
+          href={{ pathname: '/program/build', params: { dayId: programDay.id } }}
+          asChild>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`${EDIT_DAY_LABEL}. ${programDay.name}`}
+            android_ripple={{ color: 'rgba(17, 17, 17, 0.18)' }}
+            style={styles.editButton}>
+            {({ pressed }) => (
+              <Text style={[styles.editLabel, pressed && styles.pressed]}>{EDIT_DAY_LABEL}</Text>
+            )}
+          </Pressable>
+        </Link>
+      ) : null}
 
       {isLoading ? (
         <Text style={styles.status}>Loading exercises...</Text>
@@ -244,6 +284,22 @@ const styles = StyleSheet.create({
   error: {
     color: palette.text,
     fontSize: 16,
+  },
+  editButton: {
+    minHeight: 52,
+    borderRadius: 14,
+    backgroundColor: primaryButton.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  editLabel: {
+    color: primaryButton.label,
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  pressed: {
+    opacity: 0.72,
   },
   exerciseCard: {
     minHeight: 72,

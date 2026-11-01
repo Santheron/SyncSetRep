@@ -1,0 +1,21 @@
+{
+  "programName": { "origin": "extracted", "value": "Upper Lower" },
+  "days": [
+    {
+      "name": { "origin": "extracted", "value": "Upper" },
+      "subtitle": { "origin": "missing", "value": null },
+      "exercises": [
+        {
+          "sourceName": "Dumbbell Bench Press",
+          "sets": { "origin": "extracted", "value": 3, "suggestion": null },
+          "repsMin": { "origin": "extracted", "value": 10, "suggestion": null },
+          "repsMax": { "origin": "extracted", "value": 10, "suggestion": null },
+          "restSeconds": { "origin": "missing", "value": null, "suggestion": null },
+          "weight": { "origin": "missing", "value": null, "suggestion": null },
+          "notes": { "origin": "extracted", "value": "3x10" }
+        }
+      ]
+    }
+  ],
+  "warnings": []
+}

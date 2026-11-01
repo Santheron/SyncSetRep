@@ -1,12 +1,21 @@
 import { getAuthenticatedUserId } from '@/lib/current-user';
 import {
+  isActiveProgramDay,
+  PERSIST_LOAD_MODE,
+  prepareTrackedWrite,
+  type LoadMode,
+  type WeightUnit,
+} from '@/lib/load-mode';
+import { isMissingColumnError } from '@/lib/postgrest';
+import {
   assignLoggedSets,
   DUPLICATE_SLOT_MESSAGE,
   planReplacementSets,
   weightForReplacement,
 } from '@/lib/exercise-swap';
 import { getExerciseProgression } from '@/lib/progression';
-import { assertOwnProgramDay, ensureOwnProgram } from '@/lib/programs';
+import type { NoActiveProgramCode } from '@/lib/active-program';
+import { ARCHIVED_DAY_MESSAGE, assertOwnProgramDay, loadActiveProgram } from '@/lib/programs';
 import { logOwnedDataError } from '@/lib/rls-error';
 import { supabase } from '@/lib/supabase';
 import { formatWorkoutActionError } from '@/lib/workout-action-errors';
@@ -104,9 +113,14 @@ export type WorkoutSetDraft = {
   reps: number | null;
   rir: number | null;
   isCompleted: boolean;
+  loadMode?: LoadMode | null;
+  assistance?: number | null;
+  weightUnit?: WeightUnit | null;
 };
 
-type Result<T> = { ok: true; data: T } | { ok: false; error: string };
+type Result<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; code?: NoActiveProgramCode };
 
 type ProgramDayRow = {
   id: string;
@@ -360,17 +374,6 @@ function parseExerciseOverrides(row: SessionRow): ExerciseOverrides {
   }
 
   return overrides;
-}
-
-function isMissingColumnError(
-  error: { code?: string | null; message?: string | null },
-  column: string,
-): boolean {
-  const message = error.message?.toLowerCase() ?? '';
-  const name = column.toLowerCase();
-  return (
-    (error.code === 'PGRST204' || error.code === '42703') && message.includes(name)
-  );
 }
 
 async function planExercisesForSession(
@@ -997,16 +1000,13 @@ async function deleteOwnedUnfinishedSessions(sessionIds: string[]): Promise<Resu
 }
 
 export async function listProgramDays(): Promise<Result<ProgramDayOption[]>> {
-  const programResult = await ensureOwnProgram();
+  const programResult = await loadActiveProgram();
 
   if (!programResult.ok) {
     return programResult;
   }
 
-  const { data, error } = await supabase
-    .from('program_days')
-    .select(
-      `
+  const dayColumns = `
       id,
       day_order,
       name,
@@ -1014,10 +1014,33 @@ export async function listProgramDays(): Promise<Result<ProgramDayOption[]>> {
       program_exercises (
         id
       )
+    `;
+  const withArchive = await supabase
+    .from('program_days')
+    .select(
+      `
+      id,
+      day_order,
+      name,
+      subtitle,
+      archived_at,
+      program_exercises (
+        id
+      )
     `,
     )
     .eq('program_id', programResult.data)
+    .is('archived_at', null)
     .order('day_order', { ascending: true });
+  const selected =
+    withArchive.error && isMissingColumnError(withArchive.error, 'archived_at')
+      ? await supabase
+          .from('program_days')
+          .select(dayColumns)
+          .eq('program_id', programResult.data)
+          .order('day_order', { ascending: true })
+      : withArchive;
+  const { data, error } = selected;
 
   if (error) {
     console.error('[ProgramDays] query error', {
@@ -1748,7 +1771,7 @@ export async function swapWorkoutExercise(input: {
       };
     }
 
-    const programResult = await ensureOwnProgram();
+    const programResult = await loadActiveProgram();
 
     if (!programResult.ok) {
       return {
@@ -1757,12 +1780,21 @@ export async function swapWorkoutExercise(input: {
       };
     }
 
-    const ownedRow = await supabase
+    const ownedWithArchive = await supabase
       .from('program_exercises')
-      .select('id, program_days!inner(program_id)')
+      .select('id, program_days!inner(program_id, archived_at)')
       .eq('id', programExerciseId)
       .eq('program_days.program_id', programResult.data)
       .maybeSingle();
+    const ownedRow =
+      ownedWithArchive.error && isMissingColumnError(ownedWithArchive.error, 'archived_at')
+        ? await supabase
+            .from('program_exercises')
+            .select('id, program_days!inner(program_id)')
+            .eq('id', programExerciseId)
+            .eq('program_days.program_id', programResult.data)
+            .maybeSingle()
+        : ownedWithArchive;
 
     if (ownedRow.error) {
       return {
@@ -1776,6 +1808,17 @@ export async function swapWorkoutExercise(input: {
         ok: false,
         error:
           'Swapped for this workout, but that program row is not in your program so it was not updated.',
+      };
+    }
+
+    const ownedDay = unwrapRelation(
+      (ownedRow.data as { program_days?: { archived_at?: string | null } | { archived_at?: string | null }[] | null })
+        .program_days,
+    );
+    if (ownedDay && !isActiveProgramDay(ownedDay.archived_at)) {
+      return {
+        ok: false,
+        error: `Swapped for this workout, but the program was not updated. ${ARCHIVED_DAY_MESSAGE}`,
       };
     }
 
@@ -1809,11 +1852,22 @@ export async function saveWorkoutSet(
   sessionId: string,
   draft: WorkoutSetDraft,
 ): Promise<Result<{ id: string }>> {
-  const values = {
+  const tracked = prepareTrackedWrite({
+    loadMode: draft.loadMode ?? null,
     weight: draft.weight,
+    assistance: draft.assistance ?? null,
+    weightUnit: draft.weightUnit ?? null,
+    persistLoadMode: PERSIST_LOAD_MODE,
+  });
+  if (!tracked.ok) {
+    return { ok: false, error: tracked.error };
+  }
+  const values = {
+    weight: tracked.weight,
     reps: draft.reps,
     rir: draft.rir,
     is_completed: draft.isCompleted,
+    ...tracked.extra,
   };
   const logBase = {
     workout_session_id: sessionId,

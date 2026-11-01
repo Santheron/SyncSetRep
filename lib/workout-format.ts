@@ -1,4 +1,4 @@
-import { formatWeight } from '@/lib/warmup';
+import { formatLegacyLoad } from './load-mode.ts';
 
 export function formatWorkoutDate(isoDate: string): string {
   const date = new Date(isoDate);
@@ -50,17 +50,7 @@ export function formatWorkoutDuration(
 }
 
 export function formatSetLoad(weight: number | string | null): string {
-  if (weight === null || weight === '') {
-    return 'BW';
-  }
-
-  const numericWeight = Number(weight);
-
-  if (!Number.isFinite(numericWeight) || numericWeight === 0) {
-    return 'BW';
-  }
-
-  return `${formatWeight(numericWeight)} lb`;
+  return formatLegacyLoad(weight);
 }
 
 export function unwrapRelation<T>(value: T | T[] | null | undefined): T | null {

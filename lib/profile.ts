@@ -1,6 +1,5 @@
 import type { User } from '@supabase/supabase-js'
 
-import { ensureOwnProgram } from '@/lib/programs'
 import { logOwnedDataError } from '@/lib/rls-error'
 import { supabase } from '@/lib/supabase'
 
@@ -56,8 +55,6 @@ export async function ensureProfile(user: User): Promise<void> {
       .update({ display_name: displayName, updated_at: new Date().toISOString() })
       .eq('id', user.id)
   }
-
-  await ensureOwnProgram()
 }
 
 export async function getOwnProfile(): Promise<Profile | null> {
