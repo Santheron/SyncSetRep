@@ -8,6 +8,7 @@ import { Colors } from '@/constants/theme';
 import { NO_ACTIVE_PROGRAM_CODE } from '@/lib/active-program';
 import { EDIT_DAY_LABEL } from '@/lib/import/manual-program';
 import { buttonPaletteForSurface } from '@/lib/ui/button-contrast';
+import { programDayIndexLabel, scheduledProgramDayCount } from '@/lib/program-day-schedule';
 import { listProgramDays, type ProgramDayOption } from '@/lib/workout-session';
 
 const palette = Colors.dark;
@@ -63,7 +64,7 @@ export default function ProgramScreen() {
             ? 'No current program'
             : errorMessage
               ? errorMessage
-              : `${programDays.length}-day split`}
+              : `${scheduledProgramDayCount(programDays)}-day split`}
       </Text>
 
       <Link href="/program/build" asChild>
@@ -114,7 +115,9 @@ export default function ProgramScreen() {
           Could not load program days. {errorMessage}
         </Text>
       ) : (
-        programDays.map((day) => (
+        programDays.map((day) => {
+          const indexLabel = programDayIndexLabel(day);
+          return (
           <View key={day.id} style={styles.dayBlock}>
           <Link
             href={{
@@ -124,13 +127,19 @@ export default function ProgramScreen() {
             asChild>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`${day.name}. ${day.subtitle}`}
+              accessibilityLabel={
+                indexLabel == null
+                  ? `${day.name}. Optional. ${day.subtitle}`
+                  : `${day.name}. ${day.subtitle}`
+              }
               style={styles.dayPressable}>
               {({ pressed }) => (
                 <View style={pressed ? styles.dayPressed : undefined}>
                   <Card style={styles.dayCard}>
-                    <View style={styles.dayIndex}>
-                      <Text style={styles.dayIndexLabel}>{day.dayOrder}</Text>
+                    <View style={indexLabel == null ? styles.optionalIndex : styles.dayIndex}>
+                      <Text style={indexLabel == null ? styles.optionalIndexLabel : styles.dayIndexLabel}>
+                        {indexLabel ?? 'Optional'}
+                      </Text>
                     </View>
                     <View style={styles.dayCopy}>
                       <Text style={styles.dayName}>{day.name}</Text>
@@ -155,7 +164,8 @@ export default function ProgramScreen() {
             </Pressable>
           </Link>
           </View>
-        ))
+          );
+        })
       )}
     </Screen>
   );
@@ -261,6 +271,23 @@ const styles = StyleSheet.create({
     color: palette.accent,
     fontSize: 18,
     fontWeight: '800',
+  },
+  optionalIndex: {
+    minWidth: 72,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: palette.background,
+    borderWidth: 1,
+    borderColor: palette.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  optionalIndexLabel: {
+    color: palette.accent,
+    fontSize: 11,
+    fontWeight: '800',
+    textAlign: 'center',
   },
   dayCopy: {
     flex: 1,

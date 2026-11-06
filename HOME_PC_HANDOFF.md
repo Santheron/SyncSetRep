@@ -1,5 +1,36 @@
 # Home PC handoff
 
+## Current resume point (2026-11-06)
+
+The local unspecified-target package is committed on `feature/ai-workout-importer`. Production SQL is not approved and was not applied. Do not run `sql/program-unspecified-targets.sql` or its rollback on production. Do not deploy Edge Functions, build an APK, modify production data, or merge into `main`.
+
+- Migration `sql/program-unspecified-targets.sql` SHA-256 `7499352547ec9c8adf465bd6db47ebb5983a6b692d71d690de0155a7ebc46097`
+- Rollback `sql/program-unspecified-targets-rollback.sql` SHA-256 `c3d0948e9c0af09f2abed06ab21839fcb1a01837dba0f3604505c5458ce39300`
+- `save_owned_program` stores 1 through 8 days. Missing sets or reps stay null. A retry of the same `client_request_id` that asks to make the program current activates that saved program and does not insert another one. An exercise must be a shared catalog row or owned by the signed-in user.
+- Abs remains an eighth `program_days` row with subtitle `Not on the weekly schedule`. The Program tab and workout picker mark it Optional, leave it out of the split count, and do not show it as day 8.
+- The rollback raises `unspecified_targets_rollback_blocked` while any `target_sets`, `min_reps`, or `max_reps` is null.
+
+`sql/routine-write-deployment.md` stays uncommitted because that note is stale. `supabase/.temp/` stays untracked. Do not commit either.
+
+Checks that passed on the office PC before this handoff:
+
+```powershell
+npx tsc --noEmit
+node scripts/verify-structured-routine.mts
+node scripts/verify-unspecified-targets.mts
+node scripts/verify-friend-unspecified.mts
+node scripts/verify-one-tap-update.mts
+node scripts/verify-manual-program.mts
+node scripts/verify-workout-import-save.mts
+node scripts/verify-flag-paths.mts
+node scripts/verify-routine-draft.mts
+node scripts/verify-history-lock.mts
+```
+
+`scripts/verify-unspecified-targets.mts` uses disposable Postgres on `127.0.0.1:55459`. `scripts/verify-friend-unspecified.mts` uses `127.0.0.1:55462`. Do not point either script at port `5432`, port `6543`, or the hosted database. The browser workout screen was not clicked. The release-candidate web server points at production.
+
+The paragraphs below are the earlier 2026-11-01 handoff. Follow the current section above when they disagree. Do not reapply SQL that production already has.
+
 This file is the resume point after the 2026-11-01 rest-seconds backup and read-only preflight. `sql/program-exercise-rest.sql` is not applied. Do not apply it, enable a feature flag, deploy the Edge Function, merge, or build an APK until a later explicit approval.
 
 The implementation commit before this document is `efac4b5ad2a58cc885a2a8b34c8dab4781814286`. After this file is committed, the branch tip is the commit that adds this document. On the home PC, use `git rev-parse HEAD` for that SHA.
@@ -62,7 +93,7 @@ These are the only client variables. `lib/supabase.ts` reads them from the envir
 
 Names that stay unset in the app bundle:
 
-- `XAI_API_KEY` is read only by the undeployed Edge Function `supabase/functions/import-workout/index.ts`. Keep it server-side. Do not place it under `lib/import`.
+- `OPENAI_API_KEY` is read only by the undeployed Edge Function `supabase/functions/import-workout/index.ts` from the function environment. Keep that secret server-side. Do not place it under `lib/import`, the Android app, `supabase/config.toml`, or Git. The function calls the OpenAI Responses API with model `gpt-4.1-mini`. It does not read `XAI_API_KEY`.
 - `APP_VARIANT` is set by the EAS profiles in `eas.json` (`development`, `preview`, or `production`). It is not required for the local Node checks.
 - `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_PASSWORD`, `SUPABASE_DB_URL`, `DATABASE_URL`, `PGPASSWORD`, `PGHOST`, `PGPORT`, and `PGUSER` are unset. The database password is not stored in the repo, `.env`, or `pgpass`.
 

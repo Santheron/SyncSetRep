@@ -1,0 +1,37 @@
+Push
+[v] Bench Press 3x6 - 155 (80 machine)
+[v] Incline bench 3x6 - 50 (70 machine)
+[  ] Carter extension 3x8
+[v] Shoulder Press 3x8 -35
+[  ] Pec Fly 3x8 - 110
+[  ] Lateral/Front/L Raises 3x8 - 15
+[v] Skull Crusher 3x8 - 60
+[  ] Reverse wrist curl 3x8
+
+Pull
+[  ] Lat Pullover 3x8
+[  ] Pull up 3x9
+[  ] T bar row 3x6 - 90
+[  ] Single Arm Row 3x8 - 55
+[  ] Lat Pulldown 3x8 - 120
+[  ] Preacher Barbell Curl 3x8 - 35 (60 bar)
+[  ] Hammer Curl 3x8 - 35
+[  ] Single Arm Cable Curl 3x8
+[  ] Wrist Curl 3x8 - 15
+
+Abs
+[  ] Single leg 5 reps each
+[  ] Straight leg 12 reps
+[  ] Around world 8 reps
+[  ] Side crunch 4 reps each
+[  ] Crunch and hold 4 reps
+
+Legs
+[  ] Barbell Back Squats
+[  ] Hack Squats/Leg Press
+[  ] RDL
+[  ] Quad Extension
+[  ] Hamstring Curl
+[  ] Calf Raises
+
+Push - Pull - Legs - Rest - Upper body - Legs Arms - Rest

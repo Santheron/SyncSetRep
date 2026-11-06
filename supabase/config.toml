@@ -1,0 +1,9 @@
+# SyncSetRep Edge Function settings for project kbwaxskykqaymzdytjxv.
+# This file does not configure database migrations.
+# import-workout is the only function in this repository.
+
+project_id = "kbwaxskykqaymzdytjxv"
+
+[functions.import-workout]
+verify_jwt = true
+entrypoint = "./functions/import-workout/index.ts"

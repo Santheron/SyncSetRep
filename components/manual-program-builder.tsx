@@ -59,6 +59,11 @@ import {
   normalizeExerciseName,
 } from '@/lib/import/planned-exercises';
 import { TRACKING_MODE_LABELS } from '@/lib/load-mode';
+import {
+  FIRST_PROGRAM_SAVE_READY_NOTICE,
+  LOCAL_DAY_SAVE_READY_NOTICE,
+} from '@/lib/import/routine-draft';
+import { RELEASE_CANDIDATE_FEATURES_ENABLED } from '@/lib/release-candidate';
 import type { ProgramReview } from '@/lib/import/review-editor';
 
 const palette = Colors.dark;
@@ -72,6 +77,9 @@ type ManualProgramBuilderProps = {
   isSaving: boolean;
   saveErrors: readonly string[];
   savedProgramId: string | null;
+  savedIsCurrent?: boolean | null;
+  recoveryNotice?: string | null;
+  editsLocked?: boolean;
   onChange: (review: ProgramReview) => void;
   onSave: () => void;
   onSaveCustomExercise?: (name: string) => void;
@@ -90,6 +98,9 @@ export function ManualProgramBuilder({
   isSaving,
   saveErrors,
   savedProgramId,
+  savedIsCurrent = null,
+  recoveryNotice = null,
+  editsLocked = false,
   onChange,
   onSave,
   onSaveCustomExercise,
@@ -104,9 +115,10 @@ export function ManualProgramBuilder({
   const [catalogQuery, setCatalogQuery] = useState('');
   const [muscleFilter, setMuscleFilter] = useState<string | null>(null);
   const [equipmentFilter, setEquipmentFilter] = useState<string | null>(null);
+  const structureLocked = savedProgramId != null || editsLocked;
 
   function edit(next: ManualEdit) {
-    if (savedProgramId != null) {
+    if (structureLocked) {
       return;
     }
     const result = applyManualEdit(review, next);
@@ -143,7 +155,7 @@ export function ManualProgramBuilder({
     field: 'sets' | 'repsMin' | 'repsMax',
     raw: string,
   ) {
-    if (savedProgramId != null) {
+    if (structureLocked) {
       return;
     }
     const key = `${dayIndex}:${exerciseIndex}:${field}`;
@@ -166,6 +178,24 @@ export function ManualProgramBuilder({
     }
   }
 
+  function changeEquipment(dayIndex: number, exerciseIndex: number, raw: string) {
+    if (structureLocked) {
+      return;
+    }
+    const key = `${dayIndex}:${exerciseIndex}:equipment`;
+    const result = applyManualEdit(review, {
+      type: 'set-equipment-text',
+      dayIndex,
+      exerciseIndex,
+      text: raw,
+    });
+    setFieldError(result.error);
+    setDrafts((current) => ({ ...current, [key]: raw }));
+    if (!result.error && result.review !== review) {
+      onChange(result.review);
+    }
+  }
+
   const choices = mergeExerciseChoices(catalog, PLANNED_EXERCISES);
   const catalogMatches = filterCatalog(choices, catalogQuery, {
     muscle: muscleFilter,
@@ -179,17 +209,27 @@ export function ManualProgramBuilder({
     customKey !== '' &&
     !choices.some((exercise) => normalizeExerciseName(exercise.name) === customKey);
   const saveLabel = editing || hasActiveProgram ? SAVE_ROUTINE_LABEL : SAVE_FIRST_ROUTINE_LABEL;
+  const localDayNotice = RELEASE_CANDIDATE_FEATURES_ENABLED
+    ? LOCAL_DAY_SAVE_READY_NOTICE
+    : LOCAL_DAY_NOTICE;
+  const firstProgramNotice = RELEASE_CANDIDATE_FEATURES_ENABLED
+    ? FIRST_PROGRAM_SAVE_READY_NOTICE
+    : FIRST_PROGRAM_NOTICE;
   const savedMessage = editing
     ? EDIT_SAVED_MESSAGE
-    : hasActiveProgram
-      ? MANUAL_SAVED_INACTIVE_MESSAGE
-      : MANUAL_SAVED_CURRENT_MESSAGE;
+    : savedIsCurrent === true
+      ? MANUAL_SAVED_CURRENT_MESSAGE
+      : savedIsCurrent === false
+        ? MANUAL_SAVED_INACTIVE_MESSAGE
+        : hasActiveProgram
+          ? MANUAL_SAVED_INACTIVE_MESSAGE
+          : MANUAL_SAVED_CURRENT_MESSAGE;
 
   return (
     <Screen ref={scrollRef} keyboardShouldPersistTaps="handled">
       <Text style={styles.title}>{editing ? 'Edit routine' : 'Build a routine'}</Text>
-      <Text accessibilityLabel={LOCAL_DAY_NOTICE} style={styles.subtitle}>
-        {LOCAL_DAY_NOTICE}
+      <Text accessibilityLabel={localDayNotice} style={styles.subtitle}>
+        {localDayNotice}
       </Text>
       <Text style={styles.subtitle}>
         {editing
@@ -199,12 +239,17 @@ export function ManualProgramBuilder({
             : 'This routine would become your current program. Workout history stays unchanged.'}
       </Text>
       {editing || hasActiveProgram ? null : (
-        <Text accessibilityLabel={FIRST_PROGRAM_NOTICE} style={styles.notice}>
-          {FIRST_PROGRAM_NOTICE}
+        <Text accessibilityLabel={firstProgramNotice} style={styles.notice}>
+          {firstProgramNotice}
         </Text>
       )}
+      {recoveryNotice ? (
+        <Text accessibilityLabel={recoveryNotice} style={styles.notice}>
+          {recoveryNotice}
+        </Text>
+      ) : null}
 
-      <View pointerEvents={savedProgramId == null ? 'auto' : 'none'}>
+      <View pointerEvents={savedProgramId == null && !editsLocked ? 'auto' : 'none'}>
       <View style={styles.field}>
         <Text style={styles.fieldLabel}>Program name</Text>
         <TextInput
@@ -288,6 +333,9 @@ export function ManualProgramBuilder({
                     accessibilityRole="button"
                     accessibilityLabel={chooseExerciseLabel(dayNumber, exerciseNumber)}
                     onPress={() => {
+                      if (structureLocked) {
+                        return;
+                      }
                       setCatalogQuery('');
                       setMuscleFilter(null);
                       setEquipmentFilter(null);
@@ -364,6 +412,25 @@ export function ManualProgramBuilder({
                       value={drafts[maxKey] ?? numberText(exercise.repsMax.value)}
                     />
                   </View>
+                  <TextInput
+                    accessibilityLabel={`Equipment weights for exercise ${exerciseNumber} on day ${dayNumber}`}
+                    onChangeText={(raw) => changeEquipment(dayIndex, exerciseIndex, raw)}
+                    placeholder="155 (80 machine)"
+                    placeholderTextColor={palette.muted}
+                    style={styles.input}
+                    value={
+                      drafts[`${dayIndex}:${exerciseIndex}:equipment`] ??
+                      (exercise.equipmentTargets
+                        ? exercise.equipmentTargets
+                            .map((target) =>
+                              target.weight == null
+                                ? target.equipment
+                                : `${target.weight} ${target.equipment}`,
+                            )
+                            .join(', ')
+                        : '')
+                    }
+                  />
                   <TextInput
                     accessibilityLabel={notesLabel(dayNumber, exerciseNumber)}
                     maxLength={NOTE_EDIT_MAX}
@@ -548,7 +615,12 @@ export function ManualProgramBuilder({
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`Save ${customName} to your library`}
-                onPress={() => onSaveCustomExercise?.(customName)}
+                onPress={() => {
+                  if (structureLocked) {
+                    return;
+                  }
+                  onSaveCustomExercise?.(customName);
+                }}
                 style={styles.catalogRow}>
                 <Text style={styles.choiceLabel}>Save "{customName}" to your library</Text>
               </Pressable>

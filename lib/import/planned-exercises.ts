@@ -1,3 +1,5 @@
+import { RELEASE_CANDIDATE_FEATURES_ENABLED } from '../release-candidate.ts';
+
 // Local exercise catalog for the routine editor.
 // These names are not inserted into the database. Choosing one that is not
 // already in the saved library stays on this screen.
@@ -5,7 +7,7 @@
 export const CATALOG_TARGET_MIN = 300;
 export const CATALOG_TARGET_MAX = 500;
 
-export const CUSTOM_EXERCISE_WRITES_ENABLED = false;
+export const CUSTOM_EXERCISE_WRITES_ENABLED = RELEASE_CANDIDATE_FEATURES_ENABLED;
 
 export const CUSTOM_EXERCISE_PLAN = {
   writesEnabled: false,

@@ -32,6 +32,17 @@
       "env": {
         "APP_VARIANT": "production"
       }
+    },
+    "release-candidate": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "autoIncrement": true,
+      "env": {
+        "APP_VARIANT": "production",
+        "EXPO_PUBLIC_SYNCSETREP_RC": "1"
+      }
     }
   },
   "submit": {

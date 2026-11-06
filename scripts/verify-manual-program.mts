@@ -533,6 +533,64 @@ try {
   assert.equal(history.sessions.length, 30);
   assert.equal(history.sets.length, 3);
 
+  const weighted = structuredClone(review);
+  const weightedExercise = weighted.days[0]?.exercises[0];
+  assert.ok(weightedExercise);
+  weightedExercise.weight = { acceptance: 'extracted', value: 155, suggestion: null };
+  weightedExercise.plannedWeightUnit = 'lb';
+  weightedExercise.notes = '155 (80 machine)';
+  weightedExercise.equipmentTargets = [
+    { equipment: 'barbell', weight: 155, unit: 'lb' },
+    { equipment: 'machine', weight: 80, unit: 'lb' },
+  ];
+  let importedDuringOwned = 0;
+  let ownedDuringCurrent = 0;
+  const ownedCurrent = await saveManualProgram(weighted, {
+    userId: USER_ID,
+    programs: Object.freeze([{ ...currentProgram }]),
+    persistPlannedWeight: true,
+    clientRequestId: '22222222-2222-4222-8222-222222222222',
+    rpc: async () => {
+      importedDuringOwned += 1;
+      return { data: 51, error: null };
+    },
+    ownedRpc: async (args) => {
+      ownedDuringCurrent += 1;
+      assert.equal(args.p_make_current, false);
+      assert.equal(args.p_program.client_request_id, '22222222-2222-4222-8222-222222222222');
+      const row = args.p_program.days[0]?.exercises[0];
+      assert.equal(row?.planned_weight, 155);
+      assert.equal(row?.planned_weight_unit, 'lb');
+      assert.equal(JSON.stringify(args.p_program).includes('equipment_targets'), false);
+      return { data: 80, error: null };
+    },
+  });
+  assert.equal(ownedCurrent.ok, true);
+  if (ownedCurrent.ok) {
+    assert.equal(ownedCurrent.programId, '80');
+  }
+  assert.equal(importedDuringOwned, 0);
+  assert.equal(ownedDuringCurrent, 1);
+  assert.deepEqual(history, before);
+
+  let firstWithRequest = 0;
+  const firstRequest = await saveManualProgram(review, {
+    userId: USER_ID,
+    programs: Object.freeze([]),
+    clientRequestId: '33333333-3333-4333-8333-333333333333',
+    rpc: async () => {
+      firstWithRequest += 1;
+      return { data: 81, error: null };
+    },
+    ownedRpc: async (args) => {
+      assert.equal(args.p_make_current, true);
+      assert.equal(args.p_program.client_request_id, '33333333-3333-4333-8333-333333333333');
+      return { data: 81, error: null };
+    },
+  });
+  assert.equal(firstRequest.ok, true);
+  assert.equal(firstWithRequest, 0);
+
   const payloadCalls: unknown[] = [];
   const capturingRpc: ImportSaveRpc = async (_name, args) => {
     payloadCalls.push(args.p_program);
@@ -1206,7 +1264,9 @@ try {
     'consume_ai_import_quota',
     'grok',
     'api.x.ai',
+    'api.openai.com',
     'XAI_API_KEY',
+    'OPENAI_API_KEY',
     'ensureOwnProgram',
     'copy_starter',
     'workout_sessions',
@@ -1270,14 +1330,23 @@ try {
     savedScreen.includes("Platform.OS === 'ios' ? 'padding' : undefined"),
     true,
   );
-  assert.equal(buildScreen.includes('saveManualProgramForCurrentUser(review)'), true);
-  assert.equal(buildScreen.includes('saveLock.current'), true);
+  assert.equal(buildScreen.includes('saveManualProgramForCurrentUser(next, { clientRequestId })'), true);
+  assert.equal(buildScreen.includes('runGuardedProgramSave'), true);
+  assert.equal(buildScreen.includes('claimRoutineSave'), false);
+  const guardedSave = source('lib/import/one-tap-import.ts');
+  const guardedBody = guardedSave.slice(
+    guardedSave.indexOf('export async function runGuardedProgramSave'),
+    guardedSave.indexOf('function resolveImportedExercise'),
+  );
+  assert.ok(guardedBody.indexOf('claimRoutineSave') < guardedBody.indexOf('await input.saveProgram'));
+  assert.equal(buildScreen.includes('saveLock.current'), false);
   assert.equal(savedScreen.includes('activateOwnedProgramForCurrentUser'), true);
   assert.equal(savedScreen.includes('requestProgramSwitch'), true);
   assert.equal(savedScreen.includes('supabase'), false);
-  assert.equal(clientSource.includes('ACTIVATION_RPC_ENABLED = false'), true);
-  assert.equal(clientSource.includes('OWNED_PROGRAM_RPC_ENABLED = false'), true);
-  assert.equal(clientSource.includes('MANUAL_SAVE_RPC_ENABLED = false'), true);
+  assert.equal(clientSource.includes('ACTIVATION_RPC_ENABLED = RELEASE_CANDIDATE_FEATURES_ENABLED'), true);
+  assert.equal(clientSource.includes('OWNED_PROGRAM_RPC_ENABLED = RELEASE_CANDIDATE_FEATURES_ENABLED'), true);
+  assert.equal(clientSource.includes('MANUAL_SAVE_RPC_ENABLED = RELEASE_CANDIDATE_FEATURES_ENABLED'), true);
+  assert.notEqual(process.env.EXPO_PUBLIC_SYNCSETREP_RC, '1');
   assert.equal(
     clientSource.includes('io?.ownedRpc ?? (OWNED_PROGRAM_RPC_ENABLED ? defaultOwnedSaveRpc : undefined)'),
     true,
@@ -1377,14 +1446,14 @@ try {
   assert.equal(builderSource.includes('DAY_ADDED_LOCALLY_MESSAGE'), true);
   assert.equal(builderSource.includes('mergeExerciseChoices'), true);
   assert.equal(builderSource.includes('MUSCLE_GROUPS'), true);
-  assert.equal(buildScreen.includes('saveOwnedProgramEditForCurrentUser(review'), true);
+  assert.equal(buildScreen.includes('saveOwnedProgramEditForCurrentUser(next, { programId: programAtSave })'), true);
   assert.equal(buildScreen.includes('previewProgramEdit(review, draftUserId)'), false);
   assert.equal(
-    buildScreen.indexOf('saveOwnedProgramEditForCurrentUser(review') <
-      buildScreen.indexOf('saveManualProgramForCurrentUser(review)'),
+    buildScreen.indexOf('saveOwnedProgramEditForCurrentUser(next, { programId: programAtSave })') <
+      buildScreen.indexOf('saveManualProgramForCurrentUser(next, { clientRequestId })'),
     true,
   );
-  assert.equal(clientSource.includes('OWNED_PROGRAM_EDIT_ENABLED = false'), true);
+  assert.equal(clientSource.includes('OWNED_PROGRAM_EDIT_ENABLED = RELEASE_CANDIDATE_FEATURES_ENABLED'), true);
 
   for (const path of [
     'app/(tabs)/program/build.ios.tsx',

@@ -12,10 +12,14 @@ import {
   SOURCE_NAME_MAX,
   TEXT_FIELD_MAX,
   WARNING_MAX_CHARS,
-  WEIGHT_MAX,
-  WEIGHT_MIN,
   WEIGHT_TEXT_MAX,
 } from './limits.ts';
+import { parseEquipmentWeightText, type EquipmentTarget } from './equipment-targets.ts';
+import {
+  classifyImportedWeight,
+  NOTE_TOO_LONG_ISSUE_MESSAGE,
+  type PlannedWeightUnit,
+} from './planned-weight.ts';
 
 export type Origin = 'extracted' | 'missing';
 
@@ -56,6 +60,8 @@ export type ImportExerciseDraft = {
   repsMax: IntField;
   restSeconds: IntField;
   weight: WeightField;
+  plannedWeightUnit?: PlannedWeightUnit | null;
+  equipmentTargets?: EquipmentTarget[];
   notes: TextField;
 };
 
@@ -361,42 +367,6 @@ function repairInt(value: unknown, label: string, min: number, max: number): Int
   return { origin: 'extracted', value: extracted, suggestion: null };
 }
 
-function numericWeight(value: unknown): number | null {
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value) || value < WEIGHT_MIN || value > WEIGHT_MAX) {
-      return null;
-    }
-    return value;
-  }
-  if (typeof value !== 'string') {
-    return null;
-  }
-  const trimmed = value.trim();
-  if (!/^\d+(?:\.\d+)?$/.test(trimmed)) {
-    return null;
-  }
-  const parsed = Number(trimmed);
-  if (!Number.isFinite(parsed) || parsed < WEIGHT_MIN || parsed > WEIGHT_MAX) {
-    return null;
-  }
-  return parsed;
-}
-
-function repairWeight(value: unknown, path: string, issues: ImportIssue[]): WeightField {
-  if (!isRecord(value) || !isOrigin(value.origin)) {
-    throw new Error(`${path} was not accepted by checkImportSchema`);
-  }
-  const kept = value.value == null ? null : numericWeight(value.value);
-  const dropped = value.value != null && kept == null;
-  if (dropped) {
-    issues.push(issue(path, 'weight_dropped'));
-  }
-  if (value.origin === 'missing' || kept == null) {
-    return { origin: 'missing', value: null, suggestion: null };
-  }
-  return { origin: 'extracted', value: kept, suggestion: null };
-}
-
 function repairExercise(value: unknown, path: string, issues: ImportIssue[]): ImportExerciseDraft {
   if (!isRecord(value) || typeof value.sourceName !== 'string') {
     throw new Error(`${path} was not accepted by checkImportSchema`);
@@ -422,9 +392,43 @@ function repairExercise(value: unknown, path: string, issues: ImportIssue[]): Im
   }
 
   const notes = repairText(value.notes, `${path}.notes`);
-  if (notes.value != null && notes.value.length > NOTE_EDIT_MAX) {
-    issues.push(issue(`${path}.notes`, 'note_too_long'));
+  const rawWeight = isRecord(value.weight) ? value.weight.value : null;
+  const parsedEquipment = typeof rawWeight === 'string' ? parseEquipmentWeightText(rawWeight) : null;
+  let equipmentPlan: {
+    plannedWeight: number | null;
+    unit: 'lb' | 'kg' | null;
+    targets: EquipmentTarget[];
+  } | null = null;
+  if (
+    parsedEquipment?.ok === true &&
+    parsedEquipment.targets != null &&
+    parsedEquipment.targets.some((target) => target.weight != null)
+  ) {
+    equipmentPlan = {
+      plannedWeight: parsedEquipment.plannedWeight,
+      unit: parsedEquipment.unit,
+      targets: parsedEquipment.targets,
+    };
   }
+  const classified = classifyImportedWeight(rawWeight, notes.value);
+  const nextNotes = { ...notes, value: classified.notes };
+  if (nextNotes.value != null && nextNotes.value.length > NOTE_EDIT_MAX) {
+    issues.push({
+      path: `${path}.notes`,
+      code: 'note_too_long',
+      message: NOTE_TOO_LONG_ISSUE_MESSAGE,
+    });
+  }
+  if (!equipmentPlan && classified.dropped) {
+    issues.push(issue(`${path}.weight`, 'weight_dropped'));
+  }
+  const weight: WeightField = equipmentPlan
+    ? equipmentPlan.plannedWeight == null
+      ? { origin: 'missing', value: null, suggestion: null }
+      : { origin: 'extracted', value: equipmentPlan.plannedWeight, suggestion: null }
+    : classified.weight == null
+      ? { origin: 'missing', value: null, suggestion: null }
+      : { origin: 'extracted', value: classified.weight, suggestion: null };
 
   return {
     sourceName: value.sourceName,
@@ -432,8 +436,10 @@ function repairExercise(value: unknown, path: string, issues: ImportIssue[]): Im
     repsMin,
     repsMax,
     restSeconds: repairInt(value.restSeconds, `${path}.restSeconds`, REST_MIN, REST_MAX),
-    weight: repairWeight(value.weight, `${path}.weight`, issues),
-    notes,
+    weight,
+    plannedWeightUnit: equipmentPlan ? equipmentPlan.unit : classified.unit,
+    ...(equipmentPlan ? { equipmentTargets: equipmentPlan.targets } : {}),
+    notes: equipmentPlan ? notes : nextNotes,
   };
 }
 

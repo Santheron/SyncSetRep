@@ -192,7 +192,7 @@ export function usePersistedWorkoutSets(
 
   const schedulePersist = useCallback(
     (key: string) => {
-      if (!sessionId || !readyRef.current || readOnlyRef.current || completedRef.current.has(key)) {
+      if (!sessionId || !readyRef.current || readOnlyRef.current) {
         return;
       }
 
@@ -216,7 +216,7 @@ export function usePersistedWorkoutSets(
 
   const updateInput = useCallback(
     (key: string, field: keyof SetInputs, value: string) => {
-      if (!readyRef.current || readOnlyRef.current || completedRef.current.has(key)) {
+      if (!readyRef.current || readOnlyRef.current) {
         return;
       }
 

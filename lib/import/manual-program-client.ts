@@ -12,6 +12,7 @@ import {
   type SavedProgramSummary,
 } from './manual-program.ts';
 import { NO_ACTIVE_PROGRAM_MESSAGE } from '../active-program.ts';
+import { RELEASE_CANDIDATE_FEATURES_ENABLED } from '../release-candidate.ts';
 import { isMissingColumnError } from '../postgrest.ts';
 import {
   equipmentFromType,
@@ -356,13 +357,13 @@ export async function loadProgramDraftForCurrentUser(
   };
 }
 
-export const MANUAL_SAVE_RPC_ENABLED = false;
+export const MANUAL_SAVE_RPC_ENABLED = RELEASE_CANDIDATE_FEATURES_ENABLED;
 
-export const OWNED_PROGRAM_RPC_ENABLED = false;
+export const OWNED_PROGRAM_RPC_ENABLED = RELEASE_CANDIDATE_FEATURES_ENABLED;
 
 async function defaultOwnedSaveRpc(args: {
   p_program: SaveImportedProgramPayload;
-  p_make_current: true;
+  p_make_current: boolean;
 }) {
   const { supabase } = await import('../supabase.ts');
   const result = await supabase.rpc('save_owned_program', args);
@@ -376,6 +377,11 @@ export async function saveManualProgramForCurrentUser(
     loadPrograms?: () => Promise<ListResult>;
     rpc?: ImportSaveRpc;
     ownedRpc?: OwnedProgramSaveRpc;
+    clientRequestId?: string;
+    persistPlannedWeight?: boolean;
+    subtitleRequired?: boolean;
+    allowUnspecifiedPrescription?: boolean;
+    maxDays?: number;
   },
 ): Promise<SaveImportedProgramResult> {
   const getUserId = io?.getUserId ?? defaultGetUserId;
@@ -395,6 +401,11 @@ export async function saveManualProgramForCurrentUser(
     programs: programs.data,
     rpc,
     ownedRpc,
+    clientRequestId: io?.clientRequestId,
+    persistPlannedWeight: io?.persistPlannedWeight,
+    subtitleRequired: io?.subtitleRequired,
+    allowUnspecifiedPrescription: io?.allowUnspecifiedPrescription,
+    maxDays: io?.maxDays,
   });
   if (!saved.ok) {
     return { ok: false, errors: manualSaveErrors(saved.errors) };
@@ -408,7 +419,7 @@ function manualSaveErrors(errors: readonly string[]): string[] {
   );
 }
 
-export const OWNED_PROGRAM_EDIT_ENABLED = false;
+export const OWNED_PROGRAM_EDIT_ENABLED = RELEASE_CANDIDATE_FEATURES_ENABLED;
 
 async function defaultEditRpc(args: Parameters<OwnedProgramEditRpc>[0]) {
   const { supabase } = await import('../supabase.ts');
@@ -441,7 +452,7 @@ export async function saveOwnedProgramEditForCurrentUser(
   });
 }
 
-export const ACTIVATION_RPC_ENABLED = false;
+export const ACTIVATION_RPC_ENABLED = RELEASE_CANDIDATE_FEATURES_ENABLED;
 
 export const PROGRAM_SWITCH_UNAVAILABLE_MESSAGE =
   'Program switching stays off in this build. Nothing was changed.';

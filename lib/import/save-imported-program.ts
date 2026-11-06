@@ -18,6 +18,7 @@ import {
   toSavePayload,
   type SaveImportedProgramPayload,
 } from './save-payload.ts';
+import { isRoutineSaveOffline, ROUTINE_SAVE_OFFLINE_MESSAGE } from './routine-draft.ts';
 
 export const IMPORT_SAVE_FAILED_MESSAGE = 'Could not save this program. Nothing was saved.';
 
@@ -36,6 +37,7 @@ const RPC_ERROR_MESSAGES: ReadonlyArray<readonly [string, string]> = [
   ['Not authenticated', IMPORT_SIGN_IN_MESSAGE],
   ['active_program_required', IMPORT_NO_ACTIVE_PROGRAM_MESSAGE],
   ['invalid_import: duplicate_exercise', IMPORT_DUPLICATE_EXERCISE_MESSAGE],
+  ['invalid_import: exercise_owner', 'This routine includes an exercise from another account. Nothing was saved. Workout history was not changed.'],
   ['invalid_import: unknown_exercise', IMPORT_UNRESOLVED_EXERCISE_MESSAGE],
   ['invalid_import: inverted_reps', IMPORT_INVERTED_REPS_MESSAGE],
   ['invalid_import: exercise_id', IMPORT_INVALID_EXERCISE_ID_MESSAGE],
@@ -48,9 +50,13 @@ const RPC_ERROR_MESSAGES: ReadonlyArray<readonly [string, string]> = [
   ['invalid_import: day_count', IMPORT_CAPACITY_MESSAGE],
   ['invalid_import: exercises_per_day', IMPORT_CAPACITY_MESSAGE],
   ['invalid_import: exercise_count', IMPORT_CAPACITY_MESSAGE],
+  ['invalid_import: exercise_field', 'The save service rejected a field on this routine. Nothing was saved.'],
 ];
 
 function messageForRpcError(message: string | null | undefined): string {
+  if (isRoutineSaveOffline(message)) {
+    return ROUTINE_SAVE_OFFLINE_MESSAGE;
+  }
   const text = message ?? '';
   for (const [code, friendly] of RPC_ERROR_MESSAGES) {
     if (text.includes(code)) {
@@ -106,8 +112,11 @@ export async function saveImportedProgram(
   let response: { data: unknown; error: { message?: string | null } | null };
   try {
     response = await options.rpc('save_imported_program', { p_program: payload.payload });
-  } catch {
-    return { ok: false, errors: [IMPORT_SAVE_FAILED_MESSAGE] };
+  } catch (error) {
+    return {
+      ok: false,
+      errors: [isRoutineSaveOffline(error) ? ROUTINE_SAVE_OFFLINE_MESSAGE : IMPORT_SAVE_FAILED_MESSAGE],
+    };
   }
 
   if (response.error) {

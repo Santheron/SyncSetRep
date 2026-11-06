@@ -4,7 +4,7 @@ import {
   type ReviewExercise,
 } from './review-editor.ts';
 import type { PreviewNumber } from './save-plan.ts';
-import type { ImportDraft, IntField } from './validate-draft.ts';
+import type { ImportDraft, IntField, WeightField } from './validate-draft.ts';
 
 export type ReviewMatch = {
   status: 'matched' | 'ambiguous' | 'unmatched';
@@ -24,6 +24,13 @@ function numberFromDraft(field: IntField): PreviewNumber {
   };
 }
 
+function weightFromDraft(field: WeightField): PreviewNumber {
+  if (field.origin === 'extracted' && field.value != null) {
+    return { acceptance: 'extracted', value: field.value, suggestion: null };
+  }
+  return { acceptance: 'missing', value: null, suggestion: null };
+}
+
 export function programReviewFromImport(
   draft: ImportDraft,
   matchesByDay: readonly (readonly ReviewMatch[])[],
@@ -32,6 +39,7 @@ export function programReviewFromImport(
     origin: 'import',
     programName: draft.programName.value ?? '',
     issues: draft.issues,
+    warnings: draft.warnings,
     days: draft.days.map((day, dayIndex) => ({
       name: day.name.value ?? '',
       subtitle: day.subtitle.value,
@@ -53,6 +61,9 @@ export function programReviewFromImport(
           repsMax: numberFromDraft(exercise.repsMax),
           restSeconds: numberFromDraft(exercise.restSeconds),
           notes: exercise.notes.value,
+          weight: weightFromDraft(exercise.weight),
+          ...(exercise.plannedWeightUnit ? { plannedWeightUnit: exercise.plannedWeightUnit } : {}),
+          ...(exercise.equipmentTargets ? { equipmentTargets: exercise.equipmentTargets.map((target) => ({ ...target })) } : {}),
         };
       }),
     })),

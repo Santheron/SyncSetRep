@@ -21,6 +21,8 @@ export type CreateCustomExerciseRpc = (
   name: string,
 ) => Promise<{ data: unknown; error: { message?: string | null } | null }>;
 
+export type FindOwnedExercise = (name: string) => Promise<string | null>;
+
 export type CreateCustomExerciseResult =
   | { ok: true; exerciseId: string; name: string }
   | { ok: false; error: string };
@@ -72,9 +74,25 @@ async function defaultCreateRpc(name: string) {
   return { data: result.data, error: result.error };
 }
 
+async function defaultFindOwnedExercise(name: string): Promise<string | null> {
+  const { supabase } = await import('../supabase.ts');
+  const result = await supabase.from('exercises').select('id, name, owner_user_id').eq('name', name);
+  if (result.error || !Array.isArray(result.data)) {
+    return null;
+  }
+  const owned = result.data.find((row) => {
+    if (!row || typeof row !== 'object') {
+      return false;
+    }
+    const record = row as { name?: unknown; owner_user_id?: unknown };
+    return record.name === name && record.owner_user_id != null;
+  }) as { id?: unknown } | undefined;
+  return exerciseId(owned?.id);
+}
+
 export async function createCustomExercise(
   name: string,
-  options?: { rpc?: CreateCustomExerciseRpc; enabled?: boolean },
+  options?: { rpc?: CreateCustomExerciseRpc; enabled?: boolean; findOwned?: FindOwnedExercise },
 ): Promise<CreateCustomExerciseResult> {
   const clean = acceptedCustomExerciseName(name);
   if (clean == null) {
@@ -92,7 +110,19 @@ export async function createCustomExercise(
     return { ok: false, error: CUSTOM_EXERCISE_FAILED_MESSAGE };
   }
   if (response.error) {
-    return { ok: false, error: failure(response.error.message) };
+    const mapped = failure(response.error.message);
+    if (mapped === CUSTOM_EXERCISE_TAKEN_MESSAGE) {
+      const findOwned = options?.findOwned ?? defaultFindOwnedExercise;
+      try {
+        const existing = await findOwned(clean);
+        if (existing != null) {
+          return { ok: true, exerciseId: existing, name: clean };
+        }
+      } catch {
+        return { ok: false, error: CUSTOM_EXERCISE_TAKEN_MESSAGE };
+      }
+    }
+    return { ok: false, error: mapped };
   }
   const id = exerciseId(response.data);
   if (id == null) {

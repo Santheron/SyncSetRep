@@ -1,4 +1,5 @@
-import { PERSIST_REST_SECONDS, SUBTITLE_REQUIRED } from './flags.ts';
+import { PERSIST_PLANNED_WEIGHT, PERSIST_REST_SECONDS, SUBTITLE_REQUIRED } from './flags.ts';
+import { PLANNED_WEIGHT_RANGE_MESSAGE, type PlannedWeightUnit } from './planned-weight.ts';
 import {
   DAY_NAME_MAX,
   MAX_DAYS,
@@ -10,9 +11,12 @@ import {
   REPS_MIN,
   REST_MAX,
   REST_MIN,
+  SCHEMA_MAX_DAYS,
   SETS_MAX,
   SETS_MIN,
   TEXT_FIELD_MAX,
+  WEIGHT_MAX,
+  WEIGHT_MIN,
 } from './limits.ts';
 
 export type Acceptance = 'extracted' | 'accepted_suggestion' | 'user_entered' | 'missing';
@@ -34,6 +38,8 @@ export type ImportPreviewExercise = {
   repsMax: PreviewNumber;
   restSeconds: PreviewNumber;
   notes: string | null;
+  weight?: PreviewNumber;
+  plannedWeightUnit?: PlannedWeightUnit | null;
 };
 
 export type ImportPreviewDay = {
@@ -57,9 +63,13 @@ export type ImportPreview = {
 export type ImportInsertPlanOptions = {
   hasActiveProgram: boolean;
   persistRestSeconds?: boolean;
+  persistPlannedWeight?: boolean;
   subtitleRequired?: boolean;
   /** When true, refuse instead of inventing a slug. Default false sends slug null. */
   slugRequired?: boolean;
+  /** Import may store null sets or reps. Manual saves still require both. */
+  allowUnspecifiedPrescription?: boolean;
+  maxDays?: number;
 };
 
 export type ImportProgramInsert = {
@@ -72,11 +82,13 @@ export type ImportProgramInsert = {
 export type ImportProgramExerciseInsert = {
   exercise_id: string;
   exercise_order: number;
-  target_sets: number;
-  min_reps: number;
-  max_reps: number;
+  target_sets: number | null;
+  min_reps: number | null;
+  max_reps: number | null;
   notes: string | null;
   rest_seconds?: number;
+  planned_weight?: number | null;
+  planned_weight_unit?: PlannedWeightUnit | null;
 };
 
 export type ImportProgramDayInsert = {
@@ -182,15 +194,47 @@ function integerInRange(value: number | null, min: number, max: number): value i
   return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
 }
 
-function acceptedInt(field: PreviewNumber, min: number, max: number): number | null {
+function classifyPrescription(field: PreviewNumber, min: number, max: number): number | 'missing' | 'invalid' {
   const accepted =
     field.acceptance === 'extracted' ||
     field.acceptance === 'accepted_suggestion' ||
     field.acceptance === 'user_entered';
-  if (!accepted || !integerInRange(field.value, min, max)) {
-    return null;
+  if (!accepted || field.value == null) {
+    return 'missing';
+  }
+  if (!integerInRange(field.value, min, max)) {
+    return 'invalid';
   }
   return field.value;
+}
+
+function readPlannedWeight(
+  exercise: ImportPreviewExercise,
+  errors: string[],
+): { weight: number | null; unit: PlannedWeightUnit | null } | null {
+  const field = exercise.weight;
+  const accepted =
+    field?.acceptance === 'extracted' ||
+    field?.acceptance === 'accepted_suggestion' ||
+    field?.acceptance === 'user_entered';
+  const value = accepted ? field?.value ?? null : null;
+  const unit = exercise.plannedWeightUnit ?? null;
+  if (value == null) {
+    if (unit != null) {
+      push(errors, PLANNED_WEIGHT_RANGE_MESSAGE);
+      return null;
+    }
+    return { weight: null, unit: null };
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < WEIGHT_MIN || value > WEIGHT_MAX) {
+    push(errors, PLANNED_WEIGHT_RANGE_MESSAGE);
+    return null;
+  }
+  if (unit != null && unit !== 'lb' && unit !== 'kg') {
+    push(errors, PLANNED_WEIGHT_RANGE_MESSAGE);
+    return null;
+  }
+  return { weight: value, unit };
 }
 
 function readRest(field: PreviewNumber, persist: boolean, errors: string[]): number | undefined {
@@ -218,8 +262,14 @@ export function buildImportInsertPlan(
 ): ImportInsertPlanResult {
   const errors: string[] = [];
   const persistRest = options.persistRestSeconds ?? PERSIST_REST_SECONDS;
+  const persistPlanned = options.persistPlannedWeight ?? PERSIST_PLANNED_WEIGHT;
   const subtitleRequired = options.subtitleRequired ?? SUBTITLE_REQUIRED;
   const slugRequired = options.slugRequired ?? false;
+  const allowUnspecified = options.allowUnspecifiedPrescription === true;
+  const dayCap = options.maxDays ?? MAX_DAYS;
+  if (dayCap > SCHEMA_MAX_DAYS) {
+    push(errors, IMPORT_CAPACITY_MESSAGE);
+  }
 
   if (options.hasActiveProgram !== true) {
     push(errors, IMPORT_NO_ACTIVE_PROGRAM_MESSAGE);
@@ -244,7 +294,7 @@ export function buildImportInsertPlan(
   if (days.length === 0) {
     push(errors, IMPORT_EMPTY_DAYS_MESSAGE);
   }
-  if (days.length > MAX_DAYS) {
+  if (days.length > dayCap) {
     push(errors, IMPORT_CAPACITY_MESSAGE);
   }
 
@@ -285,14 +335,21 @@ export function buildImportInsertPlan(
         seen.add(id);
       }
 
-      const sets = acceptedInt(exercise.sets, SETS_MIN, SETS_MAX);
-      const repsMin = acceptedInt(exercise.repsMin, REPS_MIN, REPS_MAX);
-      const repsMax = acceptedInt(exercise.repsMax, REPS_MIN, REPS_MAX);
-      const repsInverted = repsMin != null && repsMax != null && repsMin > repsMax;
-      if (sets == null) {
+      const sets = classifyPrescription(exercise.sets, SETS_MIN, SETS_MAX);
+      const repsMin = classifyPrescription(exercise.repsMin, REPS_MIN, REPS_MAX);
+      const repsMax = classifyPrescription(exercise.repsMax, REPS_MIN, REPS_MAX);
+      const setsMissing = sets === 'missing';
+      const repsMissing = repsMin === 'missing' || repsMax === 'missing';
+      const repsInverted = typeof repsMin === 'number' && typeof repsMax === 'number' && repsMin > repsMax;
+      if (sets === 'invalid' || (setsMissing && !allowUnspecified)) {
         push(errors, IMPORT_UNACCEPTED_SETS_MESSAGE);
       }
-      if (repsMin == null || repsMax == null) {
+      if (
+        repsMin === 'invalid' ||
+        repsMax === 'invalid' ||
+        (repsMissing && !allowUnspecified) ||
+        (allowUnspecified && (repsMin === 'missing') !== (repsMax === 'missing'))
+      ) {
         push(errors, IMPORT_UNACCEPTED_REPS_MESSAGE);
       } else if (repsInverted) {
         push(errors, IMPORT_INVERTED_REPS_MESSAGE);
@@ -304,12 +361,19 @@ export function buildImportInsertPlan(
       }
 
       const rest = readRest(exercise.restSeconds, persistRest, errors);
+      const planned = persistPlanned ? readPlannedWeight(exercise, errors) : undefined;
+      const storedSets = typeof sets === 'number' ? sets : null;
+      const storedRepsMin = typeof repsMin === 'number' ? repsMin : null;
+      const storedRepsMax = typeof repsMax === 'number' ? repsMax : null;
       if (
         !confirmed ||
         id == null ||
-        sets == null ||
-        repsMin == null ||
-        repsMax == null ||
+        sets === 'invalid' ||
+        repsMin === 'invalid' ||
+        repsMax === 'invalid' ||
+        (setsMissing && !allowUnspecified) ||
+        (repsMissing && !allowUnspecified) ||
+        (allowUnspecified && (repsMin === 'missing') !== (repsMax === 'missing')) ||
         repsInverted
       ) {
         return;
@@ -321,13 +385,17 @@ export function buildImportInsertPlan(
       const row: ImportProgramExerciseInsert = {
         exercise_id: id,
         exercise_order: exerciseIndex + 1,
-        target_sets: sets,
-        min_reps: repsMin,
-        max_reps: repsMax,
+        target_sets: storedSets,
+        min_reps: storedRepsMin,
+        max_reps: storedRepsMax,
         notes,
       };
       if (typeof rest === 'number') {
         row.rest_seconds = rest;
+      }
+      if (planned) {
+        row.planned_weight = planned.weight;
+        row.planned_weight_unit = planned.unit;
       }
       exerciseRows.push(row);
     });

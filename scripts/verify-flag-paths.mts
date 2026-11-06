@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { createCustomExercise } from '../lib/import/custom-exercise.ts';
-import { IMPORT_ENABLED, PERSIST_REST_SECONDS, SUBTITLE_REQUIRED } from '../lib/import/flags.ts';
+import { IMPORT_ENABLED, PERSIST_PLANNED_WEIGHT, PERSIST_REST_SECONDS, SUBTITLE_REQUIRED } from '../lib/import/flags.ts';
 import { IMPORT_DISABLED_MESSAGE, importWorkoutDraft } from '../lib/import/import-workout.ts';
 import {
   CUSTOM_EXERCISE_SAVE_BLOCKED_MESSAGE,
@@ -47,6 +47,7 @@ const flags = {
   IMPORT_ENABLED,
   PERSIST_REST_SECONDS,
   SUBTITLE_REQUIRED,
+  PERSIST_PLANNED_WEIGHT,
   PERSIST_LOAD_MODE,
   MANUAL_SAVE_RPC_ENABLED,
   OWNED_PROGRAM_RPC_ENABLED,
@@ -76,7 +77,18 @@ assert.equal(custom.includes("supabase.rpc('create_custom_exercise'"), true);
 assert.equal(importer.includes('options?.enabled ?? IMPORT_ENABLED'), true);
 assert.equal(importer.includes("supabase.functions.invoke('import-workout'"), true);
 assert.equal(savePlan.includes('options.persistRestSeconds ?? PERSIST_REST_SECONDS'), true);
+assert.equal(savePlan.includes('options.persistPlannedWeight ?? PERSIST_PLANNED_WEIGHT'), true);
 assert.equal(savePlan.includes('options.subtitleRequired ?? SUBTITLE_REQUIRED'), true);
+const manual = source('lib/import/manual-program.ts');
+assert.equal(manual.includes('persistPlannedWeight: options.persistPlannedWeight'), true);
+assert.equal(manual.includes('persistPlannedWeight: false'), false);
+assert.equal(manual.includes('client_request_id: requestId'), true);
+const dayScreen = source('app/(tabs)/program/[id].tsx');
+assert.equal(dayScreen.includes('PERSIST_PLANNED_WEIGHT ? plannedSelect : exerciseSelect(false)'), true);
+assert.equal(dayScreen.includes('formatPlannedWeightSentence'), true);
+assert.equal(dayScreen.includes('formatLegacyLoad'), false);
+const session = source('lib/workout-session.ts');
+assert.equal(session.includes('PERSIST_PLANNED_WEIGHT ? plannedSelect : PROGRAM_EXERCISE_SELECT'), true);
 assert.equal(loadMode.includes('input.persistLoadMode ?? PERSIST_LOAD_MODE'), true);
 
 const routineEdit = source('sql/routine-edit.sql');
@@ -317,8 +329,14 @@ const builder = source('components/manual-program-builder.tsx');
 assert.equal(builder.includes('CUSTOM_EXERCISE_WRITES_ENABLED'), true);
 assert.equal(builder.includes('to your library'), true);
 const importScreen = source('app/(tabs)/program/import.tsx');
-assert.equal(importScreen.includes('importWorkoutDraft(source)'), true);
-assert.equal(importScreen.includes('saveManualProgramForCurrentUser(review)'), true);
+assert.equal(importScreen.includes('importWorkoutDraft(source, { catalog: prepared.catalog })'), true);
+assert.equal(importScreen.includes('saveManualProgramForCurrentUser(next, {'), true);
+assert.equal(importScreen.includes('saveManualProgramForCurrentUser(review)'), false);
+assert.equal(importScreen.includes('Import & Save Routine'), true);
+assert.equal(importScreen.includes('ImportReview'), false);
 assert.equal(importScreen.includes('XAI_API_KEY'), false);
+assert.equal(importScreen.includes('OPENAI_API_KEY'), false);
+assert.equal(importScreen.includes('api.openai.com'), false);
+assert.equal(importScreen.includes('api.x.ai'), false);
 
 console.log('nine flag path checks passed');

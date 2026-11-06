@@ -1,12 +1,15 @@
 import {
   DAY_NAME_MAX,
   MAX_DAYS,
+  SCHEMA_MAX_DAYS,
   MAX_EXERCISES,
   MAX_EXERCISES_PER_DAY,
   NOTE_EDIT_MAX,
   PROGRAM_NAME_MAX,
   REPS_MAX,
   REPS_MIN,
+  REST_MAX,
+  REST_MIN,
   SETS_MAX,
   SETS_MIN,
   SOURCE_NAME_MAX,
@@ -24,6 +27,7 @@ import {
   nameUnsavedExercise,
   renameProgram,
   setDaySubtitle,
+  setExerciseEquipmentText,
   setExerciseLoadMode,
   setExerciseNotes,
   setUserNumber,
@@ -38,6 +42,7 @@ import {
 } from './save-imported-program.ts';
 import { IMPORT_BLANK_SUBTITLE_MESSAGE, IMPORT_CAPACITY_MESSAGE } from './save-plan.ts';
 import { toSavePayload, type SaveImportedProgramPayload } from './save-payload.ts';
+import { parseEquipmentWeightText } from './equipment-targets.ts';
 import { isLoadMode, type LoadMode } from '../load-mode.ts';
 import {
   CUSTOM_EXERCISE_WRITES_ENABLED,
@@ -45,6 +50,7 @@ import {
   type PlannedExercise,
 } from './planned-exercises.ts';
 import { SUBTITLE_REQUIRED } from './flags.ts';
+import { acceptedSaveRequestId, isRoutineSaveOffline, ROUTINE_SAVE_OFFLINE_MESSAGE } from './routine-draft.ts';
 
 // Manual routines use the same review state as an import preview.
 // They do not call a model or consume an import quota.
@@ -149,6 +155,8 @@ export const MANUAL_SETS_MESSAGE = `Enter sets from ${SETS_MIN} through ${SETS_M
 
 export const MANUAL_REPS_MESSAGE = `Enter reps from ${REPS_MIN} through ${REPS_MAX}.`;
 
+export const MANUAL_REST_MESSAGE = `Enter rest from ${REST_MIN} through ${REST_MAX} seconds.`;
+
 export const ADD_DAY_LABEL = 'Add day';
 export const ADD_EXERCISE_LABEL = 'Add exercise';
 export const SAVE_ROUTINE_LABEL = 'Save routine';
@@ -183,7 +191,7 @@ export type CatalogFilters = {
 
 export type OwnedProgramSaveRpc = (args: {
   p_program: SaveImportedProgramPayload;
-  p_make_current: true;
+  p_make_current: boolean;
 }) => Promise<{ data: unknown; error: { message?: string | null } | null }>;
 
 export type SavedProgramListItem = {
@@ -214,7 +222,8 @@ export type ManualEdit =
   | { type: 'choose-exercise'; dayIndex: number; exerciseIndex: number; exerciseId: string }
   | { type: 'preview-exercise'; dayIndex: number; exerciseIndex: number; name: string }
   | { type: 'set-notes'; dayIndex: number; exerciseIndex: number; notes: string }
-  | { type: 'set-load-mode'; dayIndex: number; exerciseIndex: number; loadMode: LoadMode | null };
+  | { type: 'set-load-mode'; dayIndex: number; exerciseIndex: number; loadMode: LoadMode | null }
+  | { type: 'set-equipment-text'; dayIndex: number; exerciseIndex: number; text: string };
 
 export type ManualEditResult = {
   review: ProgramReview;
@@ -462,6 +471,16 @@ export function applyManualEdit(review: ProgramReview, edit: ManualEdit): Manual
       error: null,
     };
   }
+  if (edit.type === 'set-equipment-text') {
+    const parsed = parseEquipmentWeightText(edit.text);
+    if (!parsed.ok) {
+      return { review, error: parsed.error };
+    }
+    return {
+      review: setExerciseEquipmentText(review, edit.dayIndex, edit.exerciseIndex, edit.text),
+      error: null,
+    };
+  }
   if (edit.type === 'preview-exercise') {
     return {
       review: nameUnsavedExercise(
@@ -477,6 +496,16 @@ export function applyManualEdit(review: ProgramReview, edit: ManualEdit): Manual
     review: setExerciseNotes(review, edit.dayIndex, edit.exerciseIndex, edit.notes.slice(0, NOTE_EDIT_MAX)),
     error: null,
   };
+}
+
+function manualNumberError(field: ReviewNumberField): string {
+  if (field === 'sets') {
+    return MANUAL_SETS_MESSAGE;
+  }
+  if (field === 'restSeconds') {
+    return MANUAL_REST_MESSAGE;
+  }
+  return MANUAL_REPS_MESSAGE;
 }
 
 export function applyManualNumber(
@@ -498,7 +527,7 @@ export function applyManualNumber(
   if (!/^[0-9]+$/.test(raw)) {
     return {
       review,
-      error: input.field === 'sets' ? MANUAL_SETS_MESSAGE : MANUAL_REPS_MESSAGE,
+      error: manualNumberError(input.field),
     };
   }
   const value = Number(raw);
@@ -506,7 +535,7 @@ export function applyManualNumber(
   if (next === review) {
     return {
       review,
-      error: input.field === 'sets' ? MANUAL_SETS_MESSAGE : MANUAL_REPS_MESSAGE,
+      error: manualNumberError(input.field),
     };
   }
   return { review: next, error: null };
@@ -533,15 +562,24 @@ function acceptedManualInt(
   min: number,
   max: number,
 ): number | null {
+  const classified = classifyManualInt(field, min, max);
+  return typeof classified === 'number' ? classified : null;
+}
+
+function classifyManualInt(
+  field: { acceptance: string; value: number | null },
+  min: number,
+  max: number,
+): number | 'missing' | 'invalid' {
   const accepted =
     field.acceptance === 'extracted' ||
     field.acceptance === 'accepted_suggestion' ||
     field.acceptance === 'user_entered';
   if (!accepted || typeof field.value !== 'number' || !Number.isInteger(field.value)) {
-    return null;
+    return 'missing';
   }
   if (field.value < min || field.value > max) {
-    return null;
+    return 'invalid';
   }
   return field.value;
 }
@@ -591,9 +629,11 @@ export function routineUsesStoredExerciseIds(review: ProgramReview): boolean {
 
 export function validateManualRoutine(
   review: ProgramReview,
-  options?: { subtitleRequired?: boolean },
+  options?: { subtitleRequired?: boolean; allowUnspecifiedPrescription?: boolean; maxDays?: number },
 ): { ok: true } | { ok: false; errors: string[] } {
   const subtitleRequired = options?.subtitleRequired ?? SUBTITLE_REQUIRED;
+  const allowUnspecified = options?.allowUnspecifiedPrescription === true;
+  const dayCap = options?.maxDays ?? MAX_DAYS;
   const errors: string[] = [];
   const programName = typeof review.programName === 'string' ? review.programName.trim() : '';
   if (programName.length < 1 || programName.length > PROGRAM_NAME_MAX) {
@@ -604,7 +644,7 @@ export function validateManualRoutine(
   if (days.length === 0) {
     pushMessage(errors, MANUAL_EMPTY_DAYS_MESSAGE);
   }
-  if (days.length > MAX_DAYS) {
+  if (dayCap > SCHEMA_MAX_DAYS || days.length > dayCap) {
     pushMessage(errors, MANUAL_CAPACITY_SAVE_MESSAGE);
   }
 
@@ -652,15 +692,22 @@ export function validateManualRoutine(
         pushMessage(errors, MANUAL_CHOOSE_EXERCISE_MESSAGE);
       }
 
-      const sets = acceptedManualInt(exercise.sets, SETS_MIN, SETS_MAX);
-      const repsMin = acceptedManualInt(exercise.repsMin, REPS_MIN, REPS_MAX);
-      const repsMax = acceptedManualInt(exercise.repsMax, REPS_MIN, REPS_MAX);
-      if (sets == null) {
+      const sets = classifyManualInt(exercise.sets, SETS_MIN, SETS_MAX);
+      const repsMin = classifyManualInt(exercise.repsMin, REPS_MIN, REPS_MAX);
+      const repsMax = classifyManualInt(exercise.repsMax, REPS_MIN, REPS_MAX);
+      const setsMissing = sets === 'missing';
+      const repsMissing = repsMin === 'missing' || repsMax === 'missing';
+      if (sets === 'invalid' || (setsMissing && !allowUnspecified)) {
         pushMessage(errors, MANUAL_SETS_SAVE_MESSAGE);
       }
-      if (repsMin == null || repsMax == null) {
+      if (
+        repsMin === 'invalid' ||
+        repsMax === 'invalid' ||
+        (repsMissing && !allowUnspecified) ||
+        (allowUnspecified && (repsMin === 'missing') !== (repsMax === 'missing'))
+      ) {
         pushMessage(errors, MANUAL_REPS_SAVE_MESSAGE);
-      } else if (repsMin > repsMax) {
+      } else if (typeof repsMin === 'number' && typeof repsMax === 'number' && repsMin > repsMax) {
         pushMessage(errors, MANUAL_REPS_ORDER_MESSAGE);
       }
 
@@ -699,12 +746,28 @@ function previewForStoredSave(review: ProgramReview) {
 }
 
 function ownedSaveError(message: string | null | undefined): string {
+  if (isRoutineSaveOffline(message)) {
+    return ROUTINE_SAVE_OFFLINE_MESSAGE;
+  }
   const text = message ?? '';
   if (text.includes('Not authenticated')) {
     return MANUAL_SIGN_IN_SAVE_MESSAGE;
   }
   if (text.includes('active_program_exists')) {
     return ALREADY_CURRENT_PROGRAM_MESSAGE;
+  }
+  if (text.includes('invalid_import: exercise_owner')) {
+    return 'This routine includes an exercise from another account. Nothing was saved. Workout history was not changed.';
+  }
+  if (text.includes('invalid_import: exercise_field')) {
+    return 'The save service rejected a field on this routine. Nothing was saved.';
+  }
+  if (
+    text.includes('invalid_import: sets') ||
+    text.includes('invalid_import: reps') ||
+    text.includes('invalid_import: day_count')
+  ) {
+    return 'The save service cannot store this routine yet. Nothing was saved. The original text is still here. Workout history was not changed.';
   }
   return 'Could not save this routine. Nothing was saved.';
 }
@@ -830,6 +893,9 @@ export function ownedProgramUpdatePayload(
 }
 
 function editSaveError(message: string | null | undefined): string {
+  if (isRoutineSaveOffline(message)) {
+    return ROUTINE_SAVE_OFFLINE_MESSAGE;
+  }
   const text = message ?? '';
   if (text.includes('Not authenticated')) {
     return MANUAL_SIGN_IN_SAVE_MESSAGE;
@@ -872,8 +938,15 @@ export async function saveOwnedProgramEdit(
   let response: { data: unknown; error: { message?: string | null } | null };
   try {
     response = await options.rpc({ p_program: payload.payload });
-  } catch {
-    return { ok: false, errors: ['Could not save these edits. Nothing was changed.'] };
+  } catch (error) {
+    return {
+      ok: false,
+      errors: [
+        isRoutineSaveOffline(error)
+          ? ROUTINE_SAVE_OFFLINE_MESSAGE
+          : 'Could not save these edits. Nothing was changed.',
+      ],
+    };
   }
   if (response.error) {
     return { ok: false, errors: [editSaveError(response.error.message)] };
@@ -894,6 +967,10 @@ export async function saveManualProgram(
     ownedRpc?: OwnedProgramSaveRpc;
     subtitleRequired?: boolean;
     persistRestSeconds?: boolean;
+    persistPlannedWeight?: boolean;
+    clientRequestId?: string;
+    allowUnspecifiedPrescription?: boolean;
+    maxDays?: number;
   },
 ): Promise<SaveImportedProgramResult> {
   if (typeof options.userId !== 'string' || options.userId.trim() === '') {
@@ -904,7 +981,13 @@ export async function saveManualProgram(
     return valid;
   }
   const canStoreIds = routineUsesStoredExerciseIds(review);
-  if (!hasCurrentProgram(options.programs)) {
+  const requestId =
+    options.clientRequestId == null ? null : acceptedSaveRequestId(options.clientRequestId);
+  if (options.clientRequestId != null && requestId == null) {
+    return { ok: false, errors: ['Could not save this routine. Nothing was saved.'] };
+  }
+  const makeCurrent = !hasCurrentProgram(options.programs);
+  if (requestId != null || makeCurrent) {
     if (!options.ownedRpc || !canStoreIds) {
       return { ok: false, errors: [FIRST_PROGRAM_UNAVAILABLE_MESSAGE] };
     }
@@ -912,18 +995,31 @@ export async function saveManualProgram(
       hasActiveProgram: true,
       subtitleRequired: options.subtitleRequired,
       persistRestSeconds: options.persistRestSeconds,
+      persistPlannedWeight: options.persistPlannedWeight,
+      allowUnspecifiedPrescription: options.allowUnspecifiedPrescription,
+      maxDays: options.maxDays,
     });
     if (!payload.ok) {
       return payload;
     }
+    const programPayload = requestId
+      ? { ...payload.payload, client_request_id: requestId }
+      : payload.payload;
     let response: { data: unknown; error: { message?: string | null } | null };
     try {
       response = await options.ownedRpc({
-        p_program: payload.payload,
-        p_make_current: true,
+        p_program: programPayload,
+        p_make_current: makeCurrent,
       });
-    } catch {
-      return { ok: false, errors: ['Could not save this routine. Nothing was saved.'] };
+    } catch (error) {
+      return {
+        ok: false,
+        errors: [
+          isRoutineSaveOffline(error)
+            ? ROUTINE_SAVE_OFFLINE_MESSAGE
+            : 'Could not save this routine. Nothing was saved.',
+        ],
+      };
     }
     if (response.error) {
       return { ok: false, errors: [ownedSaveError(response.error.message)] };

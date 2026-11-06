@@ -6,6 +6,8 @@ import {
   type LoadMode,
   type WeightUnit,
 } from '@/lib/load-mode';
+import { sanitizeEquipmentTargets, type EquipmentTarget } from '@/lib/import/equipment-targets';
+import { PERSIST_PLANNED_WEIGHT } from '@/lib/import/flags';
 import { isMissingColumnError } from '@/lib/postgrest';
 import {
   assignLoggedSets,
@@ -19,6 +21,7 @@ import { ARCHIVED_DAY_MESSAGE, assertOwnProgramDay, loadActiveProgram } from '@/
 import { logOwnedDataError } from '@/lib/rls-error';
 import { supabase } from '@/lib/supabase';
 import { formatWorkoutActionError } from '@/lib/workout-action-errors';
+import { acceptedProgramExerciseTargets } from './workout-today.ts';
 import {
   createAsyncLock,
   partitionUnfinishedSessions,
@@ -61,8 +64,16 @@ export type ProgramExercise = {
   targetSets: number;
   minReps: number;
   maxReps: number;
+  /** Null means the routine did not include this number. Absent means unknown. */
+  prescribedSets?: number | null;
+  prescribedRepsMin?: number | null;
+  prescribedRepsMax?: number | null;
   notes: string | null;
+  plannedWeight?: number | null;
+  plannedWeightUnit?: 'lb' | 'kg' | null;
+  equipmentTargets?: EquipmentTarget[] | null;
   exercise: WorkoutExercise | null;
+  templateExercise?: WorkoutExercise | null;
 };
 
 export type ExerciseOverrides = Record<string, string>;
@@ -164,6 +175,9 @@ type ProgramExerciseRow = {
   min_reps: number;
   max_reps: number;
   notes: string | null;
+  planned_weight?: number | string | null;
+  planned_weight_unit?: string | null;
+  equipment_targets?: unknown;
   exercise: ExerciseRow | ExerciseRow[] | null;
 };
 
@@ -187,13 +201,17 @@ type FinishedSessionRow = {
   finished_at: string | null;
 };
 
-const PROGRAM_EXERCISE_SELECT = `
+const PROGRAM_EXERCISE_COLUMNS = `
   id,
   exercise_order,
   target_sets,
   min_reps,
   max_reps,
   notes,
+`;
+
+const PROGRAM_EXERCISE_SELECT = `
+  ${PROGRAM_EXERCISE_COLUMNS}
   exercise:exercises (
     id,
     name,
@@ -230,6 +248,7 @@ function toExercise(row: ExerciseRow | ExerciseRow[] | null): WorkoutExercise | 
 
 function toProgramExercise(row: ProgramExerciseRow): ProgramExercise {
   const id = String(row.id);
+  const exercise = toExercise(row.exercise);
 
   return {
     id,
@@ -238,8 +257,21 @@ function toProgramExercise(row: ProgramExerciseRow): ProgramExercise {
     targetSets: toFiniteNumber(row.target_sets) ?? 0,
     minReps: toFiniteNumber(row.min_reps) ?? 0,
     maxReps: toFiniteNumber(row.max_reps) ?? 0,
+    prescribedSets: toFiniteNumber(row.target_sets),
+    prescribedRepsMin: toFiniteNumber(row.min_reps),
+    prescribedRepsMax: toFiniteNumber(row.max_reps),
     notes: row.notes == null ? null : String(row.notes),
-    exercise: toExercise(row.exercise),
+    ...(row.planned_weight !== undefined
+      ? {
+          plannedWeight: toFiniteNumber(row.planned_weight),
+          plannedWeightUnit: row.planned_weight_unit === 'lb' || row.planned_weight_unit === 'kg' ? row.planned_weight_unit : null,
+        }
+      : {}),
+    ...(row.equipment_targets !== undefined
+      ? { equipmentTargets: sanitizeEquipmentTargets(row.equipment_targets) }
+      : {}),
+    exercise,
+    templateExercise: exercise,
   };
 }
 
@@ -265,11 +297,52 @@ function toSetRecord(row: WorkoutSetRow): WorkoutSetRecord {
 }
 
 async function fetchProgramExercises(programDayId: string): Promise<Result<ProgramExercise[]>> {
-  const { data, error } = await supabase
+  const plannedSelect = `
+    ${PROGRAM_EXERCISE_COLUMNS}
+    planned_weight,
+    planned_weight_unit,
+    equipment_targets,
+    exercise:exercises (
+      id,
+      name,
+      category,
+      exercise_type,
+      equipment_type,
+      warmup_enabled,
+      min_weight,
+      weight_increment
+    )
+  `;
+  const selected = await supabase
     .from('program_exercises')
-    .select(PROGRAM_EXERCISE_SELECT)
+    .select(PERSIST_PLANNED_WEIGHT ? plannedSelect : PROGRAM_EXERCISE_SELECT)
     .eq('program_day_id', programDayId)
     .order('exercise_order', { ascending: true });
+  const missingTargets =
+    PERSIST_PLANNED_WEIGHT &&
+    selected.error &&
+    isMissingColumnError(selected.error, 'equipment_targets') &&
+    !isMissingColumnError(selected.error, 'planned_weight');
+  const plannedOnly = missingTargets
+    ? await supabase
+        .from('program_exercises')
+        .select(plannedSelect.replace('equipment_targets,', ''))
+        .eq('program_day_id', programDayId)
+        .order('exercise_order', { ascending: true })
+    : selected;
+  const retry =
+    PERSIST_PLANNED_WEIGHT &&
+    plannedOnly.error &&
+    (isMissingColumnError(plannedOnly.error, 'planned_weight') ||
+      isMissingColumnError(plannedOnly.error, 'planned_weight_unit') ||
+      isMissingColumnError(plannedOnly.error, 'equipment_targets'));
+  const { data, error } = retry
+    ? await supabase
+        .from('program_exercises')
+        .select(PROGRAM_EXERCISE_SELECT)
+        .eq('program_day_id', programDayId)
+        .order('exercise_order', { ascending: true })
+    : plannedOnly;
 
   if (error) {
     console.error('[ProgramExercises] query error', {
@@ -459,8 +532,10 @@ async function planExercisesForSession(
     }
 
     const hasDisplaySets = setRows.some((row) => row.exerciseId === displayId);
+    const unspecified =
+      item.prescribedSets === null || item.prescribedRepsMin === null || item.prescribedRepsMax === null;
     const keepWithoutSets =
-      setRows.length === 0 || Boolean(overrideId) || hasDisplaySets;
+      setRows.length === 0 || Boolean(overrideId) || hasDisplaySets || unspecified;
 
     if (!keepWithoutSets) {
       continue;
@@ -471,7 +546,7 @@ async function planExercisesForSession(
       maxSetNumber(setRows, displayId),
     );
 
-    if (!hasDisplaySets && remainingTarget < 1) {
+    if (!hasDisplaySets && remainingTarget < 1 && !unspecified) {
       continue;
     }
 
@@ -1848,6 +1923,98 @@ export async function swapWorkoutExercise(input: {
   return loadActiveWorkout(input.sessionId);
 }
 
+export async function addUnfinishedWorkoutSet(
+  sessionId: string,
+  exerciseId: string,
+  setNumber: number,
+): Promise<Result<{ id: string }>> {
+  if (!Number.isInteger(setNumber) || setNumber < 1 || setNumber > 12) {
+    return { ok: false, error: 'Enter sets from 1 through 12.' };
+  }
+  const { data, error } = await supabase
+    .from('workout_sets')
+    .insert({
+      workout_session_id: sessionId,
+      exercise_id: exerciseId,
+      set_number: setNumber,
+      weight: null,
+      reps: null,
+      rir: null,
+      is_completed: false,
+    })
+    .select('id')
+    .maybeSingle();
+  if (error || !data?.id) {
+    return {
+      ok: false,
+      error: formatWorkoutActionError({
+        action: 'save-set',
+        code: error?.code,
+        message: error?.message ?? 'This set was not added.',
+      }),
+    };
+  }
+  return { ok: true, data: { id: String(data.id) } };
+}
+
+export async function removeUnfinishedWorkoutSet(
+  sessionId: string,
+  setId: string,
+): Promise<Result<true>> {
+  const { data, error } = await supabase
+    .from('workout_sets')
+    .delete()
+    .eq('id', setId)
+    .eq('workout_session_id', sessionId)
+    .eq('is_completed', false)
+    .select('id');
+  if (error) {
+    return {
+      ok: false,
+      error: formatWorkoutActionError({
+        action: 'save-set',
+        code: error.code,
+        message: error.message,
+      }),
+    };
+  }
+  if (!data || data.length === 0) {
+    return { ok: false, error: 'Completed sets stay in this workout.' };
+  }
+  return { ok: true, data: true };
+}
+
+export async function saveProgramExerciseTargets(
+  programExerciseId: string,
+  targets: { sets: number; repsMin: number; repsMax: number },
+): Promise<Result<true>> {
+  const accepted = acceptedProgramExerciseTargets(programExerciseId, targets);
+  if (!accepted.ok) {
+    return accepted;
+  }
+  const { data, error } = await supabase
+    .from('program_exercises')
+    .update({
+      target_sets: accepted.sets,
+      min_reps: accepted.repsMin,
+      max_reps: accepted.repsMax,
+    })
+    .eq('id', accepted.id)
+    .select('id')
+    .maybeSingle();
+  if (error || !data?.id) {
+    return {
+      ok: false,
+      error: formatWorkoutActionError({
+        action: 'save-set',
+        code: error?.code,
+        message: error?.message ?? 'The routine was not updated. Today’s workout was not changed.',
+      }),
+    };
+  }
+  return { ok: true, data: true };
+}
+
 export async function saveWorkoutSet(
   sessionId: string,
   draft: WorkoutSetDraft,
@@ -2122,6 +2289,73 @@ export async function finishWorkoutSession(sessionId: string): Promise<Result<tr
   });
 
   return { ok: true, data: true };
+}
+
+export type FinishedSetHistory = {
+  exerciseId: string;
+  sessionId: string;
+  finishedAt: string;
+  setNumber: number;
+  weight: number | null;
+  reps: number | null;
+  isCompleted: boolean;
+};
+
+export async function fetchFinishedSetsForExercises(
+  exerciseIds: readonly string[],
+  excludeSessionId?: string,
+): Promise<Result<FinishedSetHistory[]>> {
+  const ids = [...new Set(exerciseIds.map((id) => String(id)).filter((id) => id !== ''))];
+  if (ids.length === 0) {
+    return { ok: true, data: [] };
+  }
+  const userResult = await getAuthenticatedUserId();
+  if (!userResult.ok) {
+    return userResult;
+  }
+  let query = supabase
+    .from('workout_sets')
+    .select(
+      'id, exercise_id, set_number, weight, reps, is_completed, workout_session_id, workout_sessions!inner(finished_at, user_id)',
+    )
+    .in('exercise_id', ids)
+    .eq('is_completed', true)
+    .eq('workout_sessions.user_id', userResult.data)
+    .not('workout_sessions.finished_at', 'is', null);
+  if (excludeSessionId) {
+    query = query.neq('workout_session_id', excludeSessionId);
+  }
+  const { data, error } = await query.order('set_number', { ascending: true });
+  if (error) {
+    return { ok: false, error: error.message };
+  }
+  const rows: FinishedSetHistory[] = [];
+  for (const row of data ?? []) {
+    const record = row as {
+      exercise_id?: string | number;
+      set_number?: number | string | null;
+      weight?: number | string | null;
+      reps?: number | string | null;
+      is_completed?: boolean | null;
+      workout_session_id?: string | number;
+      workout_sessions?: { finished_at?: string | null } | { finished_at?: string | null }[] | null;
+    };
+    const session = unwrapRelation(record.workout_sessions ?? null);
+    const finishedAt = session?.finished_at ?? null;
+    if (!finishedAt || record.exercise_id == null || record.workout_session_id == null) {
+      continue;
+    }
+    rows.push({
+      exerciseId: String(record.exercise_id),
+      sessionId: String(record.workout_session_id),
+      finishedAt,
+      setNumber: toFiniteNumber(record.set_number) ?? 0,
+      weight: toFiniteNumber(record.weight),
+      reps: toFiniteNumber(record.reps),
+      isCompleted: Boolean(record.is_completed),
+    });
+  }
+  return { ok: true, data: rows };
 }
 
 export type PersonalRecord = {

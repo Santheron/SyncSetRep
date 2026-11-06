@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
+import { applySourceLineMachineNotes, classifyImportedWeight } from '../lib/import/planned-weight.ts';
 import { IMPORT_SCHEMA } from '../lib/import/schema.ts';
 import {
   checkImportSchema,
@@ -181,6 +182,72 @@ const heavyWeight = clone(valid);
 exerciseOf(heavyWeight).weight.value = 2001;
 assert.equal(
   kept(heavyWeight).issues.some((item) => item.code === 'weight_dropped'),
+  true,
+);
+
+const originalNotes = exerciseOf(valid).notes.value;
+assert.equal(bodyweightDraft.days[0]?.exercises[0]?.notes.value, originalNotes);
+assert.equal(kept(heavyWeight).days[0]?.exercises[0]?.notes.value, originalNotes);
+
+const classified = [
+  ['135 lb', 135, 'lb', null],
+  ['135lbs', 135, 'lb', null],
+  ['60 kg', 60, 'kg', null],
+  ['60kgs', 60, 'kg', null],
+  ['lb 135', 135, 'lb', null],
+  ['225 lb stack 8', 225, 'lb', 'stack 8'],
+  ['stack 8, pin 4', null, null, 'stack 8, pin 4'],
+] as const;
+for (const [text, weight, unit, clause] of classified) {
+  const result = classifyImportedWeight(text, 'Pause');
+  assert.equal(result.weight, weight, text);
+  assert.equal(result.unit, unit, text);
+  assert.equal(result.dropped, clause == null && weight == null, text);
+  if (clause == null) {
+    assert.equal(result.notes, 'Pause', text);
+  } else {
+    assert.equal(result.notes, `Pause. ${clause}`, text);
+  }
+}
+const twoLoads = classifyImportedWeight('135 lb and 60 kg', null);
+assert.equal(twoLoads.weight, null);
+assert.equal(twoLoads.unit, null);
+assert.equal(twoLoads.dropped, true);
+assert.equal(twoLoads.notes, null);
+const stacking = classifyImportedWeight('stacking plates', 'Keep');
+assert.equal(stacking.weight, null);
+assert.equal(stacking.dropped, true);
+assert.equal(stacking.notes, 'Keep');
+const outOfRangeUnit = classifyImportedWeight('2001 lb', null);
+assert.equal(outOfRangeUnit.weight, null);
+assert.equal(outOfRangeUnit.dropped, true);
+
+const machineDraft = kept(clone(valid));
+const machineExercise = machineDraft.days[0]?.exercises[0];
+if (!machineExercise) {
+  throw new Error('fixture exercise missing');
+}
+machineExercise.sourceName = 'Leg Press';
+machineExercise.notes.value = null;
+machineExercise.weight.value = null;
+const lined = applySourceLineMachineNotes(machineDraft, 'Leg Press pin 5, then stack 8\nBench Press 135 lb');
+assert.equal(lined.days[0]?.exercises[0]?.notes.value, 'pin 5, then stack 8');
+assert.equal(lined.days[0]?.exercises[0]?.weight.value, null);
+const duplicated = applySourceLineMachineNotes(
+  machineDraft,
+  'Leg Press pin 5\nLeg Press stack 8',
+);
+assert.equal(duplicated.days[0]?.exercises[0]?.notes.value, null);
+const longNotes = 'n'.repeat(270);
+machineExercise.notes.value = longNotes;
+const longClause = `pin ${'x'.repeat(20)}`;
+const longLine = applySourceLineMachineNotes(machineDraft, `Leg Press ${longClause}`);
+const longValue = longLine.days[0]?.exercises[0]?.notes.value ?? '';
+assert.equal(longValue, `${longNotes}. ${longClause}`);
+assert.equal(longValue.length > 280, true);
+assert.equal(longValue.length, longNotes.length + 2 + longClause.length);
+assert.equal(
+  longLine.issues.some((item) => item.code === 'note_too_long' && item.path === 'days[0].exercises[0].notes'),
   true,
 );
 

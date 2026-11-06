@@ -9,11 +9,13 @@ export const IMPORT_INVALID_EXERCISE_ID_MESSAGE =
 
 export type SaveImportedProgramExercise = {
   exercise_id: number;
-  target_sets: number;
-  min_reps: number;
-  max_reps: number;
+  target_sets: number | null;
+  min_reps: number | null;
+  max_reps: number | null;
   notes: string | null;
   rest_seconds?: number;
+  planned_weight?: number | null;
+  planned_weight_unit?: 'lb' | 'kg' | null;
 };
 
 export type SaveImportedProgramDay = {
@@ -26,6 +28,7 @@ export type SaveImportedProgramDay = {
 export type SaveImportedProgramPayload = {
   name: string;
   days: SaveImportedProgramDay[];
+  client_request_id?: string;
 };
 
 export type SavePayloadResult =
@@ -81,6 +84,10 @@ export function toSavePayload(
       };
       if (typeof exercise.rest_seconds === 'number') {
         row.rest_seconds = exercise.rest_seconds;
+      }
+      if (Object.hasOwn(exercise, 'planned_weight')) {
+        row.planned_weight = exercise.planned_weight ?? null;
+        row.planned_weight_unit = exercise.planned_weight_unit ?? null;
       }
       exercises.push(row);
     }

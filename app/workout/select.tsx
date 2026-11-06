@@ -9,6 +9,7 @@ import {
 import { Card, Screen } from '@/components/screen';
 import { Colors } from '@/constants/theme';
 import { NO_ACTIVE_PROGRAM_CODE } from '@/lib/active-program';
+import { programDayIndexLabel } from '@/lib/program-day-schedule';
 import { useAuth } from '@/lib/auth-context';
 import { partitionUnfinishedSessions, workoutNavigationTarget } from '@/lib/workout-day-selection';
 import {
@@ -378,20 +379,27 @@ export default function SelectWorkoutDayScreen() {
       ) : (
         days.map((day) => {
           const isStarting = busyAction === `day:${day.id}`;
+          const indexLabel = programDayIndexLabel(day);
 
           return (
             <Pressable
               key={day.id}
               accessibilityRole="button"
-              accessibilityLabel={`${day.name}. ${day.subtitle}. ${exerciseCountLabel(day.exerciseCount)}`}
+              accessibilityLabel={
+                indexLabel == null
+                  ? `${day.name}. Optional. ${day.subtitle}. ${exerciseCountLabel(day.exerciseCount)}`
+                  : `${day.name}. ${day.subtitle}. ${exerciseCountLabel(day.exerciseCount)}`
+              }
               disabled={isBusy}
               onPress={() => {
                 void selectDay(day);
               }}
               style={({ pressed }) => pressed && styles.pressed}>
               <Card style={styles.dayCard}>
-                <View style={styles.dayIndex}>
-                  <Text style={styles.dayIndexLabel}>{day.dayOrder}</Text>
+                <View style={indexLabel == null ? styles.optionalIndex : styles.dayIndex}>
+                  <Text style={indexLabel == null ? styles.optionalIndexLabel : styles.dayIndexLabel}>
+                    {indexLabel ?? 'Optional'}
+                  </Text>
                 </View>
                 <View style={styles.dayCopy}>
                   <Text style={styles.dayName}>{day.name}</Text>
@@ -482,6 +490,23 @@ const styles = StyleSheet.create({
     color: palette.accent,
     fontSize: 18,
     fontWeight: '800',
+  },
+  optionalIndex: {
+    minWidth: 72,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: palette.background,
+    borderWidth: 1,
+    borderColor: palette.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  optionalIndexLabel: {
+    color: palette.accent,
+    fontSize: 11,
+    fontWeight: '800',
+    textAlign: 'center',
   },
   dayCopy: {
     flex: 1,

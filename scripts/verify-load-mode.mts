@@ -368,7 +368,8 @@ for (const path of phonePaths) {
   }
 }
 const editClient = source('lib/import/manual-program-client.ts');
-assert.equal(editClient.includes('OWNED_PROGRAM_EDIT_ENABLED = false'), true);
+assert.equal(editClient.includes('OWNED_PROGRAM_EDIT_ENABLED = RELEASE_CANDIDATE_FEATURES_ENABLED'), true);
+assert.notEqual(process.env.EXPO_PUBLIC_SYNCSETREP_RC, '1');
 assert.equal(
   editClient.includes('io?.rpc ?? (OWNED_PROGRAM_EDIT_ENABLED ? defaultEditRpc : undefined)'),
   true,

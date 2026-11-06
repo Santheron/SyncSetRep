@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { createCustomExercise } from '../lib/import/custom-exercise.ts';
-import { IMPORT_ENABLED, PERSIST_REST_SECONDS, SUBTITLE_REQUIRED } from '../lib/import/flags.ts';
+import { IMPORT_ENABLED, PERSIST_PLANNED_WEIGHT, PERSIST_REST_SECONDS, SUBTITLE_REQUIRED } from '../lib/import/flags.ts';
 import { importWorkoutDraft, IMPORT_DISABLED_MESSAGE } from '../lib/import/import-workout.ts';
 import {
   CUSTOM_EXERCISE_SAVE_BLOCKED_MESSAGE,
@@ -27,6 +27,7 @@ const USER_ID = '11111111-1111-1111-1111-111111111111';
 assert.equal(IMPORT_ENABLED, false);
 assert.equal(PERSIST_REST_SECONDS, false);
 assert.equal(SUBTITLE_REQUIRED, false);
+assert.equal(PERSIST_PLANNED_WEIGHT, false);
 assert.equal(PERSIST_LOAD_MODE, false);
 assert.equal(MANUAL_SAVE_RPC_ENABLED, false);
 assert.equal(OWNED_PROGRAM_RPC_ENABLED, false);
@@ -92,6 +93,31 @@ const saved = await saveManualProgram(
 assert.deepEqual(saved, { ok: true, programId: '15' });
 assert.equal(JSON.stringify(savedPayload).includes('rest_seconds'), false);
 assert.equal(JSON.stringify(savedPayload).includes('load_mode'), false);
+assert.equal(JSON.stringify(savedPayload).includes('planned_weight'), false);
+
+const weightedReview = {
+  ...review,
+  days: review.days.map((day) => ({
+    ...day,
+    subtitle: 'Upper',
+    exercises: day.exercises.map((exercise) => ({
+      ...exercise,
+      weight: { acceptance: 'user_entered' as const, value: 135.5, suggestion: null },
+      plannedWeightUnit: 'lb' as const,
+    })),
+  })),
+};
+let ownedPayload: unknown = null;
+const firstProgram = await saveManualProgram(weightedReview, {
+  userId: USER_ID,
+  programs: [],
+  ownedRpc: async (args) => {
+    ownedPayload = args.p_program;
+    return { data: '21', error: null };
+  },
+});
+assert.deepEqual(firstProgram, { ok: true, programId: '21' });
+assert.equal(JSON.stringify(ownedPayload).includes('planned_weight'), false);
 
 const blockedEdit = await saveOwnedProgramEdit(review, { userId: USER_ID, programId: '9' });
 assert.deepEqual(blockedEdit, { ok: false, errors: [EDIT_SAVE_BLOCKED_MESSAGE] });
@@ -175,6 +201,8 @@ try {
 const importScreen = readFileSync(new URL('../app/(tabs)/program/import.tsx', import.meta.url), 'utf8');
 assert.equal(importScreen.includes('XAI_API_KEY'), false);
 assert.equal(importScreen.includes('api.x.ai'), false);
+assert.equal(importScreen.includes('OPENAI_API_KEY'), false);
+assert.equal(importScreen.includes('api.openai.com'), false);
 assert.equal(importScreen.includes('importWorkoutDraft'), true);
 const functionSource = readFileSync(
   new URL('../supabase/functions/import-workout/index.ts', import.meta.url),

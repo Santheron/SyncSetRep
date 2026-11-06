@@ -139,7 +139,7 @@ try {
   assert.equal(capped.days.length, 7);
 
   const editorSource = readFileSync(new URL('../lib/import/review-editor.ts', import.meta.url), 'utf8');
-  for (const token of ['grok', 'api.x.ai', 'supabase', 'XAI_API_KEY', 'validate-draft', 'pdf-text', 'ensureOwnProgram']) {
+  for (const token of ['grok', 'api.x.ai', 'api.openai.com', 'supabase', 'XAI_API_KEY', 'OPENAI_API_KEY', 'validate-draft', 'pdf-text', 'ensureOwnProgram']) {
     assert.equal(editorSource.includes(token), false, token);
   }
 } finally {

@@ -1,6 +1,10 @@
 import { formatTrackedLoad, type LoadMode, type WeightUnit } from '@/lib/load-mode';
+import { recommendedWeightIncreaseLb } from '@/lib/weight-increase';
 import { formatWeight } from '@/lib/warmup';
 import { formatWorkoutDate } from '@/lib/workout-format';
+import { prescribedRepsLine } from './workout-today.ts';
+
+export { recommendedWeightIncreaseLb } from '@/lib/weight-increase';
 
 export type ProgressionExercise = {
   targetSets: number;
@@ -51,15 +55,9 @@ type WorkingSet = {
   weightUnit?: WeightUnit | null;
 };
 
-const UPPER_INCREASE_LB = 5;
-const LOWER_COMPOUND_INCREASE_LB = 10;
 const DEFAULT_INCREMENT_LB = 5;
 
 const BODYWEIGHT_NAME = /pull[-\s]?ups?|chin[-\s]?ups?|\bdips?\b/;
-const LOWER_BODY = /quad|hamstring|glute|calf|\bleg\b|lower|hip|adductor|abductor/;
-const LOWER_COMPOUND_NAME =
-  /squat|deadlift|lunge|rdl|romanian|hip thrust|leg press|split squat|step[- ]?up|good morning/;
-const ISOLATION_NAME = /curl|extension|calf|fly|raise|kickback|pushdown|lateral/;
 
 export function isBodyweightExercise(input: {
   name: string;
@@ -85,18 +83,6 @@ export function isBodyweightExercise(input: {
     previousSets.length > 0 &&
     previousSets.every((set) => set.weight === null || set.weight === 0)
   );
-}
-
-export function recommendedWeightIncreaseLb(input: {
-  name: string;
-  category?: string | null;
-  exerciseType?: string | null;
-}): number {
-  if (isLowerBodyCompound(input)) {
-    return LOWER_COMPOUND_INCREASE_LB;
-  }
-
-  return UPPER_INCREASE_LB;
 }
 
 function toFiniteNumber(value: unknown): number | null {
@@ -163,7 +149,7 @@ export function getExerciseProgression(input: {
     equipmentType: input.equipmentType,
     previousSets: displayedSets,
   });
-  const repRange = `${input.minReps}–${input.maxReps} reps`;
+  const repRange = prescribedRepsLine(input.minReps, input.maxReps);
   const previousDateLabel =
     input.previousDate && !Number.isNaN(Date.parse(input.previousDate))
       ? formatWorkoutDate(input.previousDate)
@@ -176,7 +162,7 @@ export function getExerciseProgression(input: {
       previousDateLabel: null,
       previousLine: 'First recorded session',
       previousLines: ['First recorded session'],
-      targetLine: repRange,
+      targetLine: repRange ?? 'Reps not set',
       recommendedWeight: null,
       weightIncrease: null,
       badges: [],
@@ -186,6 +172,7 @@ export function getExerciseProgression(input: {
 
   const previousReps = workingSets.map((set) => set.reps);
   const hitMaxOnAllWorkingSets =
+    repRange != null &&
     input.targetSets > 0 &&
     workingSets.length >= input.targetSets &&
     workingSets
@@ -202,7 +189,7 @@ export function getExerciseProgression(input: {
       previousDateLabel,
       previousLine: previousLines.join(' · '),
       previousLines,
-      targetLine: hitMaxOnAllWorkingSets ? repRange : `Beat ${slashReps}`,
+      targetLine: hitMaxOnAllWorkingSets && repRange != null ? repRange : `Beat ${slashReps}`,
       recommendedWeight: null,
       weightIncrease: null,
       badges: [hitMaxOnAllWorkingSets ? 'Ready to add weight' : 'Beat last time'],
@@ -257,8 +244,10 @@ export function getExerciseProgression(input: {
     previousLines,
     targetLine:
       recommendedWeight === null
-        ? repRange
-        : `${formatWeight(recommendedWeight)} lb · ${repRange}`,
+        ? (repRange ?? 'Reps not set')
+        : repRange == null
+          ? `${formatWeight(recommendedWeight)} lb`
+          : `${formatWeight(recommendedWeight)} lb · ${repRange}`,
     recommendedWeight,
     weightIncrease: increase,
     badges,
@@ -317,7 +306,7 @@ export function buildWorkoutProgressions(
         previousDateLabel: null,
         previousLine: 'First recorded session',
         previousLines: ['First recorded session'],
-        targetLine: `${item.minReps}–${item.maxReps} reps`,
+        targetLine: prescribedRepsLine(item.minReps, item.maxReps) ?? 'Reps not set',
         recommendedWeight: null,
         weightIncrease: null,
         badges: [],
@@ -351,26 +340,6 @@ function formatPreviousSetLine(set: WorkingSet, isBodyweight: boolean): string {
   }
 
   return line;
-}
-
-function isLowerBodyCompound(input: {
-  name: string;
-  category?: string | null;
-  exerciseType?: string | null;
-}): boolean {
-  const name = input.name.trim().toLowerCase();
-  const category = input.category?.trim().toLowerCase() ?? '';
-  const exerciseType = input.exerciseType?.trim().toLowerCase() ?? '';
-
-  if (ISOLATION_NAME.test(name)) {
-    return false;
-  }
-
-  const looksLower = LOWER_BODY.test(category) || LOWER_BODY.test(name) || LOWER_COMPOUND_NAME.test(name);
-  const looksCompound =
-    exerciseType.includes('compound') || LOWER_COMPOUND_NAME.test(name) || exerciseType.length === 0;
-
-  return looksLower && looksCompound;
 }
 
 function sharedWorkingWeight(sets: WorkingSet[]): number | null {

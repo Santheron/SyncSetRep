@@ -1,5 +1,24 @@
 import type { LoadMode } from '../load-mode.ts';
-import { MAX_DAYS, MAX_EXERCISES, MAX_EXERCISES_PER_DAY, REPS_MAX, REPS_MIN, SETS_MAX, SETS_MIN } from './limits.ts';
+import {
+  parseEquipmentWeightText,
+  primaryPlannedWeight,
+  type EquipmentTarget,
+} from './equipment-targets.ts';
+import {
+  MAX_DAYS,
+  MAX_EXERCISES,
+  MAX_EXERCISES_PER_DAY,
+  NOTE_EDIT_MAX,
+  REPS_MAX,
+  REPS_MIN,
+  REST_MAX,
+  REST_MIN,
+  SETS_MAX,
+  SETS_MIN,
+  SOURCE_NAME_MAX,
+  WEIGHT_MAX,
+  WEIGHT_MIN,
+} from './limits.ts';
 import type { ImportPreview, ImportPreviewIssue, PreviewMatchStatus, PreviewNumber } from './save-plan.ts';
 
 // Shared editor state for a program a person has reviewed.
@@ -19,6 +38,12 @@ export type ReviewExercise = {
   restSeconds: PreviewNumber;
   notes: string | null;
   loadMode?: LoadMode | null;
+  /** Display only until a planned-weight save includes it. */
+  weight?: PreviewNumber;
+  /** Unit for weight. Null means a number with no unit. Absent means unset. */
+  plannedWeightUnit?: 'lb' | 'kg' | null;
+  /** Equipment-specific planned weights. Absent means the single planned weight only. */
+  equipmentTargets?: EquipmentTarget[];
 };
 
 export type ReviewDay = {
@@ -34,9 +59,11 @@ export type ProgramReview = {
   programName: string;
   days: ReviewDay[];
   issues: ImportPreviewIssue[];
+  /** Model notes that have no program column. Edits must keep them. */
+  warnings?: readonly string[];
 };
 
-export type ReviewNumberField = 'sets' | 'repsMin' | 'repsMax';
+export type ReviewNumberField = 'sets' | 'repsMin' | 'repsMax' | 'restSeconds';
 
 function missingNumber(): PreviewNumber {
   return { acceptance: 'missing', value: null };
@@ -54,6 +81,11 @@ function copyExercise(exercise: ReviewExercise): ReviewExercise {
     restSeconds: { ...exercise.restSeconds },
     notes: exercise.notes,
     loadMode: exercise.loadMode ?? null,
+    ...(exercise.weight ? { weight: { ...exercise.weight } } : {}),
+    ...(exercise.plannedWeightUnit !== undefined ? { plannedWeightUnit: exercise.plannedWeightUnit } : {}),
+    ...(exercise.equipmentTargets
+      ? { equipmentTargets: exercise.equipmentTargets.map((target) => ({ ...target })) }
+      : {}),
   };
 }
 
@@ -71,12 +103,14 @@ export function createProgramReview(input: {
   programName: string;
   days: readonly ReviewDay[];
   issues?: readonly ImportPreviewIssue[];
+  warnings?: readonly string[];
 }): ProgramReview {
   return {
     origin: input.origin,
     programName: input.programName,
     days: input.days.map(copyDay),
     issues: (input.issues ?? []).map((issue) => ({ ...issue })),
+    ...(input.warnings ? { warnings: [...input.warnings] } : {}),
   };
 }
 
@@ -276,9 +310,30 @@ export function nameUnsavedExercise(
   return replaceDay(review, dayIndex, { ...copyDay(day), exercises });
 }
 
+export function renameImportedExercise(
+  review: ProgramReview,
+  dayIndex: number,
+  exerciseIndex: number,
+  name: string,
+): ProgramReview {
+  const day = review.days[dayIndex];
+  const exercise = day?.exercises[exerciseIndex];
+  if (!day || !exercise) {
+    return review;
+  }
+  const next = copyExercise(exercise);
+  next.sourceName = name.slice(0, SOURCE_NAME_MAX);
+  const exercises = day.exercises.map(copyExercise);
+  exercises[exerciseIndex] = next;
+  return replaceDay(review, dayIndex, { ...copyDay(day), exercises });
+}
+
 function rangeFor(field: ReviewNumberField): { min: number; max: number } {
   if (field === 'sets') {
     return { min: SETS_MIN, max: SETS_MAX };
+  }
+  if (field === 'restSeconds') {
+    return { min: REST_MIN, max: REST_MAX };
   }
   return { min: REPS_MIN, max: REPS_MAX };
 }
@@ -359,6 +414,113 @@ export function setExerciseLoadMode(
   return replaceDay(review, dayIndex, { ...copyDay(day), exercises });
 }
 
+export function setExerciseEquipmentText(
+  review: ProgramReview,
+  dayIndex: number,
+  exerciseIndex: number,
+  text: string,
+): ProgramReview {
+  const day = review.days[dayIndex];
+  const exercise = day?.exercises[exerciseIndex];
+  if (!day || !exercise) {
+    return review;
+  }
+  const parsed = parseEquipmentWeightText(text);
+  if (!parsed.ok) {
+    return review;
+  }
+  const next = copyExercise(exercise);
+  if (parsed.targets == null) {
+    delete next.equipmentTargets;
+    if (parsed.plannedWeight == null) {
+      next.weight = { acceptance: 'missing', value: null, suggestion: null };
+      next.plannedWeightUnit = null;
+    } else {
+      next.weight = { acceptance: 'user_entered', value: parsed.plannedWeight, suggestion: null };
+      next.plannedWeightUnit = parsed.unit;
+    }
+  } else {
+    const primary = primaryPlannedWeight(parsed.targets);
+    next.equipmentTargets = parsed.targets;
+    if (primary.weight == null) {
+      next.weight = { acceptance: 'missing', value: null, suggestion: null };
+      next.plannedWeightUnit = null;
+    } else {
+      next.weight = { acceptance: 'user_entered', value: primary.weight, suggestion: null };
+      next.plannedWeightUnit = primary.unit;
+    }
+  }
+  const exercises = day.exercises.map(copyExercise);
+  exercises[exerciseIndex] = next;
+  return replaceDay(review, dayIndex, { ...copyDay(day), exercises });
+}
+
+export function setExercisePlannedWeight(
+  review: ProgramReview,
+  dayIndex: number,
+  exerciseIndex: number,
+  value: number | null,
+): ProgramReview {
+  const day = review.days[dayIndex];
+  const exercise = day?.exercises[exerciseIndex];
+  if (!day || !exercise) {
+    return review;
+  }
+  if (value != null && (!Number.isFinite(value) || value < WEIGHT_MIN || value > WEIGHT_MAX)) {
+    return review;
+  }
+  const next = copyExercise(exercise);
+  if (value == null) {
+    next.weight = { acceptance: 'missing', value: null, suggestion: null };
+    next.plannedWeightUnit = null;
+  } else {
+    next.weight = { acceptance: 'user_entered', value, suggestion: null };
+  }
+  const exercises = day.exercises.map(copyExercise);
+  exercises[exerciseIndex] = next;
+  return replaceDay(review, dayIndex, { ...copyDay(day), exercises });
+}
+
+export function setExercisePlannedUnit(
+  review: ProgramReview,
+  dayIndex: number,
+  exerciseIndex: number,
+  unit: 'lb' | 'kg' | null,
+): ProgramReview {
+  const day = review.days[dayIndex];
+  const exercise = day?.exercises[exerciseIndex];
+  if (!day || !exercise) {
+    return review;
+  }
+  if ((unit === 'lb' || unit === 'kg') && exercise.weight?.value == null) {
+    return review;
+  }
+  const next = copyExercise(exercise);
+  next.plannedWeightUnit = unit;
+  const exercises = day.exercises.map(copyExercise);
+  exercises[exerciseIndex] = next;
+  return replaceDay(review, dayIndex, { ...copyDay(day), exercises });
+}
+
+export function setImportedExerciseNotes(
+  review: ProgramReview,
+  dayIndex: number,
+  exerciseIndex: number,
+  notes: string,
+): ProgramReview {
+  const next = setExerciseNotes(review, dayIndex, exerciseIndex, notes);
+  const path = `days[${dayIndex}].exercises[${exerciseIndex}].notes`;
+  const issues = next.issues.filter((issue) => !(issue.path === path && issue.code === 'note_too_long'));
+  if (notes.length > NOTE_EDIT_MAX) {
+    issues.push({
+      path,
+      code: 'note_too_long',
+      message: 'Shorten this note to 280 characters or fewer before saving.',
+    });
+  }
+  return { ...next, issues };
+}
+
 export function setExerciseNotes(
   review: ProgramReview,
   dayIndex: number,
@@ -391,6 +553,8 @@ export function toImportPreview(review: ProgramReview): ImportPreview {
         repsMax: { ...exercise.repsMax },
         restSeconds: { ...exercise.restSeconds },
         notes: exercise.notes,
+        ...(exercise.weight ? { weight: { ...exercise.weight } } : {}),
+        ...(exercise.plannedWeightUnit !== undefined ? { plannedWeightUnit: exercise.plannedWeightUnit } : {}),
       })),
     })),
     issues: review.issues.map((issue) => ({ ...issue })),

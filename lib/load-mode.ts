@@ -1,3 +1,4 @@
+import { RELEASE_CANDIDATE_FEATURES_ENABLED } from './release-candidate.ts';
 import { formatWeight } from './warmup.ts';
 
 // Explicit tracking for new sets. A null mode is a legacy external weight.
@@ -6,7 +7,7 @@ import { formatWeight } from './warmup.ts';
 export type LoadMode = 'bodyweight' | 'added' | 'assisted';
 export type WeightUnit = 'lb' | 'kg';
 
-export const PERSIST_LOAD_MODE = false;
+export const PERSIST_LOAD_MODE = RELEASE_CANDIDATE_FEATURES_ENABLED;
 
 export const LOAD_MODE_SAVE_BLOCKED_MESSAGE =
   'Saving added weight and assistance stays off in this build. Nothing was saved.';

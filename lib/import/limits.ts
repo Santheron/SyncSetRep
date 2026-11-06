@@ -2,8 +2,12 @@ export const PDF_MAX_BYTES = 2_097_152;
 export const PDF_MAX_PAGES = 8;
 export const PDF_MIN_ALNUM = 40;
 export const TEXT_MAX_CHARS = 20_000;
+// Three UTF-8 bytes per character, plus a 3-byte BOM. A larger file cannot
+// fit in TEXT_MAX_CHARS, so the picker rejects it before decoding.
+export const TXT_MAX_BYTES = TEXT_MAX_CHARS * 3 + 3;
 
 export const MAX_DAYS = 7;
+export const OWNED_SAVE_MAX_DAYS = 8;
 export const SCHEMA_MAX_DAYS = 16;
 export const MAX_EXERCISES_PER_DAY = 12;
 export const SCHEMA_MAX_EXERCISES_PER_DAY = 24;

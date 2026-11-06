@@ -75,5 +75,17 @@ assert.equal(historyScreen.includes('historyTrackingColumnMissing(trackedSets.er
 assert.equal(historyScreen.includes('HISTORY_SET_SELECT_LEGACY'), true);
 assert.equal(historyScreen.includes('HISTORY_SET_SELECT_TRACKED'), true);
 assert.equal(historyScreen.includes('archived_at'), false);
+assert.equal(historyScreen.includes('planned_weight'), false);
+const historySets = readFileSync(new URL('../lib/history-sets.ts', import.meta.url), 'utf8');
+assert.equal(historySets.includes('planned_weight'), false);
+const workoutScreen = readFileSync(new URL('../app/workout/[sessionId].tsx', import.meta.url), 'utf8');
+assert.equal(workoutScreen.includes("value={String(values.weight ?? '')}"), true);
+assert.equal(workoutScreen.includes('formatPlannedWeightSentence'), true);
+assert.equal(workoutScreen.includes('saveWorkoutSet'), false);
+assert.equal(workoutScreen.includes('planned_weight'), false);
+const persistedSets = readFileSync(new URL('../hooks/use-persisted-workout-sets.ts', import.meta.url), 'utf8');
+assert.equal(persistedSets.includes('saveWorkoutSet'), true);
+assert.equal(persistedSets.includes('planned_weight'), false);
+assert.equal(persistedSets.includes('plannedWeight'), false);
 
 console.log('history display checks passed');

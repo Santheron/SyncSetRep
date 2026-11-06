@@ -3,7 +3,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { IMPORT_ENABLED, PERSIST_REST_SECONDS, SUBTITLE_REQUIRED } from '../lib/import/flags.ts';
+import { IMPORT_ENABLED, PERSIST_PLANNED_WEIGHT, PERSIST_REST_SECONDS, SUBTITLE_REQUIRED } from '../lib/import/flags.ts';
+import { PLANNED_WEIGHT_RANGE_MESSAGE } from '../lib/import/planned-weight.ts';
 import {
   saveImportedProgram,
   saveImportedProgramForCurrentUser,
@@ -112,6 +113,7 @@ try {
   assert.equal(IMPORT_ENABLED, false);
   assert.equal(PERSIST_REST_SECONDS, false);
   assert.equal(SUBTITLE_REQUIRED, false);
+  assert.equal(PERSIST_PLANNED_WEIGHT, false);
 
   const payload = payloadOf(toSavePayload(preview(), USER_ID, { hasActiveProgram: true }));
   assert.equal(payload.name, 'Upper Lower');
@@ -149,6 +151,71 @@ try {
   for (const key of FORBIDDEN_PAYLOAD_KEYS) {
     assert.equal(encoded.includes(`"${key}"`), false, key);
   }
+  assert.equal(encoded.includes('planned_weight'), false);
+
+  const weighted = preview();
+  const weightedRow = weighted.days[1]?.exercises[0];
+  const plainRow = weighted.days[1]?.exercises[1];
+  if (!weightedRow || !plainRow) {
+    throw new Error('preview exercise missing');
+  }
+  weightedRow.weight = { acceptance: 'extracted', value: 135.5, suggestion: null };
+  weightedRow.plannedWeightUnit = null;
+  const stored = payloadOf(
+    toSavePayload(weighted, USER_ID, { hasActiveProgram: true, persistPlannedWeight: true }),
+  );
+  assert.equal(stored.days[1]?.exercises[0]?.planned_weight, 135.5);
+  assert.equal(stored.days[1]?.exercises[0]?.planned_weight_unit, null);
+  assert.equal(stored.days[1]?.exercises[1]?.planned_weight, null);
+  assert.equal(stored.days[1]?.exercises[1]?.planned_weight_unit, null);
+  assert.equal(JSON.stringify(payload).includes('planned_weight'), false);
+
+  const kilograms = preview();
+  const kilogramRow = kilograms.days[1]?.exercises[0];
+  if (!kilogramRow) {
+    throw new Error('preview exercise missing');
+  }
+  kilogramRow.weight = { acceptance: 'user_entered', value: 60, suggestion: null };
+  kilogramRow.plannedWeightUnit = 'kg';
+  const kilogramPayload = payloadOf(
+    toSavePayload(kilograms, USER_ID, { hasActiveProgram: true, persistPlannedWeight: true }),
+  );
+  assert.equal(kilogramPayload.days[1]?.exercises[0]?.planned_weight, 60);
+  assert.equal(kilogramPayload.days[1]?.exercises[0]?.planned_weight_unit, 'kg');
+
+  const bounds = preview();
+  const zeroRow = bounds.days[1]?.exercises[0];
+  const maxRow = bounds.days[1]?.exercises[1];
+  if (!zeroRow || !maxRow) {
+    throw new Error('preview exercise missing');
+  }
+  zeroRow.weight = { acceptance: 'user_entered', value: 0, suggestion: null };
+  maxRow.weight = { acceptance: 'user_entered', value: 2000, suggestion: null };
+  const boundPayload = payloadOf(
+    toSavePayload(bounds, USER_ID, { hasActiveProgram: true, persistPlannedWeight: true }),
+  );
+  assert.equal(boundPayload.days[1]?.exercises[0]?.planned_weight, 0);
+  assert.equal(boundPayload.days[1]?.exercises[0]?.planned_weight_unit, null);
+  assert.equal(boundPayload.days[1]?.exercises[1]?.planned_weight, 2000);
+
+  const unitOnly = preview();
+  const unitRow = unitOnly.days[1]?.exercises[0];
+  if (!unitRow) {
+    throw new Error('preview exercise missing');
+  }
+  unitRow.plannedWeightUnit = 'lb';
+  assert.deepEqual(errorsOf(toSavePayload(unitOnly, USER_ID, { hasActiveProgram: true, persistPlannedWeight: true })), [
+    PLANNED_WEIGHT_RANGE_MESSAGE,
+  ]);
+  const tooHeavy = preview();
+  const heavyRow = tooHeavy.days[1]?.exercises[0];
+  if (!heavyRow) {
+    throw new Error('preview exercise missing');
+  }
+  heavyRow.weight = { acceptance: 'extracted', value: 2001, suggestion: null };
+  assert.deepEqual(errorsOf(toSavePayload(tooHeavy, USER_ID, { hasActiveProgram: true, persistPlannedWeight: true })), [
+    PLANNED_WEIGHT_RANGE_MESSAGE,
+  ]);
 
   const withRest = payloadOf(
     toSavePayload(preview(), USER_ID, { hasActiveProgram: true, persistRestSeconds: true }),
